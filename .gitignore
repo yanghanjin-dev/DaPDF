@@ -1,0 +1,4 @@
+/dist/
+/releases/
+/vendor/pdfium.tgz
+/vendor/include/*.orig
