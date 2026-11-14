@@ -40,7 +40,7 @@ use windows_sys::Win32::{
             VK_OEM_MINUS, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
         },
         Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, ShellExecuteW, HDROP},
-        WindowsAndMessaging::{
+        WindowsAndMessaging::{TrackPopupMenu, GetCursorPos, TPM_RETURNCMD, TPM_NONOTIFY,
             AppendMenuW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
             DispatchMessageW, GetClientRect, GetMessageW, GetWindowLongPtrW, GetWindowPlacement,
             LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW, SetCursor, SetMenu,
@@ -90,6 +90,10 @@ const BOOKMARK_ROW_HEIGHT: i32 = 26;
 const THUMB_ITEM_HEIGHT: i32 = 216;
 const SPREAD_GAP: i32 = 16;
 const TOOLBAR_HEIGHT: i32 = 40;
+
+const IDM_CTX_COPY: u16 = 8901;
+const IDM_CTX_HIGHLIGHT: u16 = 8902;
+const IDM_CTX_SEARCH: u16 = 8903;
 const STATUSBAR_HEIGHT: i32 = 28;
 
 const PDFACTION_GOTO: c_ulong = 1;
@@ -4798,6 +4802,72 @@ unsafe extern "system" fn wnd_proc(
             0
         }
 
+                WM_RBUTTONDOWN => {
+            if !state_ptr.is_null() {
+                let state = &mut *state_ptr;
+                let click_x = (lparam & 0xFFFF) as i16 as i32;
+                let click_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+
+                if state.text_selection.is_some() {
+                    unsafe {
+                        let hpopup = CreatePopupMenu();
+                        let w_copy = to_wstring("복사 (Ctrl+C)");
+                        let w_hl = to_wstring("형광펜 강조 추가");
+                        let w_sch = to_wstring("문서에서 이 단어 검색");
+                        AppendMenuW(hpopup, MF_STRING, IDM_CTX_COPY as usize, w_copy.as_ptr());
+                        AppendMenuW(hpopup, MF_STRING, IDM_CTX_HIGHLIGHT as usize, w_hl.as_ptr());
+                        AppendMenuW(hpopup, MF_STRING, IDM_CTX_SEARCH as usize, w_sch.as_ptr());
+
+                        let mut pt = POINT { x: 0, y: 0 };
+                        GetCursorPos(&mut pt);
+                        let cmd = TrackPopupMenu(
+                            hpopup,
+                            TPM_RETURNCMD | TPM_NONOTIFY,
+                            pt.x,
+                            pt.y,
+                            0,
+                            hwnd,
+                            null(),
+                        );
+                        DeleteObject(hpopup as _);
+
+                        if cmd == IDM_CTX_COPY as i32 {
+                            state.copy_text_to_clipboard(hwnd);
+                        } else if cmd == IDM_CTX_HIGHLIGHT as i32 {
+                            if let Some(ref sel) = state.text_selection.clone() {
+                                for r in &sel.rects {
+                                    state.overlays.push(UserOverlay {
+                                        page_index: sel.page_index,
+                                        kind: OverlayKind::Highlight,
+                                        x1: r.left / state.cur_page_w_pt,
+                                        y1: r.top / state.cur_page_h_pt,
+                                        x2: r.right / state.cur_page_w_pt,
+                                        y2: r.bottom / state.cur_page_h_pt,
+                                        points: Vec::new(),
+                                        label: String::new(),
+                                        checked: false,
+                                    });
+                                }
+                                state.status_msg = Some("선택 영역에 형광펜 강조 주석이 추가되었습니다".to_string());
+                                state.refresh_view(hwnd, true);
+                            }
+                        } else if cmd == IDM_CTX_SEARCH as i32 {
+                            if let Some(ref sel) = state.text_selection.clone() {
+                                let query: String = sel.text.chars().take(24).collect();
+                                if !query.trim().is_empty() {
+                                    state.search_query = query.trim().to_string();
+                                    state.input_mode = InputMode::Normal;
+                                    state.perform_search(true);
+                                    state.refresh_view(hwnd, true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            0
+        }
+
         WM_LBUTTONDOWN => {
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
@@ -5658,5 +5728,6 @@ fn main() {
         FPDF_DestroyLibrary();
     }
 }
+
 
 
