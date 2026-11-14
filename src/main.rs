@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::ffi::{c_void, CString};
+use std::ffi::{c_void, CStr, CString};
 use std::fs::{self, File};
 use std::io::Write;
 use std::mem::{size_of, zeroed};
@@ -39,18 +39,18 @@ use windows_sys::Win32::{
             VK_ESCAPE, VK_F1, VK_F11, VK_F3, VK_HOME, VK_LEFT, VK_NEXT, VK_OEM_4, VK_OEM_6,
             VK_OEM_MINUS, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
         },
-        Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP},
+        Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, ShellExecuteW, HDROP},
         WindowsAndMessaging::{
             AppendMenuW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
             DispatchMessageW, GetClientRect, GetMessageW, GetWindowLongPtrW, GetWindowPlacement,
-            LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW, SetMenu, SetWindowLongPtrW,
-            SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-            CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE, HWND_TOP, IDC_ARROW,
-            MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SWP_FRAMECHANGED,
-            SWP_NOOWNERZORDER, SWP_NOZORDER, SW_SHOW, WINDOWPLACEMENT, WM_CHAR, WM_COMMAND,
-            WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
-            WS_VISIBLE,
+            LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW, SetCursor, SetMenu,
+            SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
+            TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE, HWND_TOP,
+            IDC_ARROW, IDC_HAND, MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING,
+            MSG, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_SHOWNORMAL, SW_SHOW,
+            WINDOWPLACEMENT, WM_CHAR, WM_COMMAND, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND,
+            WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+            WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     },
 };
@@ -65,6 +65,10 @@ const THUMB_ITEM_HEIGHT: i32 = 216;
 const SPREAD_GAP: i32 = 16;
 const TOOLBAR_HEIGHT: i32 = 40;
 const STATUSBAR_HEIGHT: i32 = 28;
+
+// PDFium Action Type 상수 (fpdf_doc.h)
+const PDFACTION_GOTO: c_ulong = 1;
+const PDFACTION_URI: c_ulong = 3;
 
 // ============================================================================
 // 메뉴 ID 상수
@@ -237,6 +241,19 @@ extern "C" {
         device_y: *mut c_int,
     ) -> c_int;
 
+    fn FPDF_DeviceToPage(
+        page: *mut c_void,
+        start_x: c_int,
+        start_y: c_int,
+        size_x: c_int,
+        size_y: c_int,
+        rotate: c_int,
+        device_x: c_int,
+        device_y: c_int,
+        page_x: *mut c_double,
+        page_y: *mut c_double,
+    ) -> c_int;
+
     fn FPDFBitmap_Create(width: c_int, height: c_int, alpha: c_int) -> *mut c_void;
     fn FPDFBitmap_FillRect(
         bitmap: *mut c_void,
@@ -291,6 +308,7 @@ extern "C" {
         bottom: *mut c_double,
     ) -> c_int;
 
+    // 북마크, 링크 및 액션 API (fpdf_doc.h)
     fn FPDFBookmark_GetFirstChild(document: *mut c_void, bookmark: *mut c_void) -> *mut c_void;
     fn FPDFBookmark_GetNextSibling(document: *mut c_void, bookmark: *mut c_void) -> *mut c_void;
     fn FPDFBookmark_GetTitle(
@@ -300,7 +318,23 @@ extern "C" {
     ) -> c_ulong;
     fn FPDFBookmark_GetDest(document: *mut c_void, bookmark: *mut c_void) -> *mut c_void;
     fn FPDFBookmark_GetAction(bookmark: *mut c_void) -> *mut c_void;
+
+    fn FPDFLink_GetLinkAtPoint(
+        page: *mut c_void,
+        x: c_double,
+        y: c_double,
+    ) -> *mut c_void;
+    fn FPDFLink_GetDest(document: *mut c_void, link: *mut c_void) -> *mut c_void;
+    fn FPDFLink_GetAction(link: *mut c_void) -> *mut c_void;
+
+    fn FPDFAction_GetType(action: *mut c_void) -> c_ulong;
     fn FPDFAction_GetDest(document: *mut c_void, action: *mut c_void) -> *mut c_void;
+    fn FPDFAction_GetURIPath(
+        document: *mut c_void,
+        action: *mut c_void,
+        buffer: *mut c_void,
+        buflen: c_ulong,
+    ) -> c_ulong;
     fn FPDFDest_GetDestPageIndex(document: *mut c_void, dest: *mut c_void) -> c_int;
 
     fn FPDF_GetMetaText(
@@ -401,6 +435,12 @@ struct ThumbnailCache {
     width: i32,
     height: i32,
     pixels: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum LinkTarget {
+    InternalPage(i32),
+    ExternalUri(String),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -519,6 +559,8 @@ struct AppState {
     pan_x: i32,
     pan_y: i32,
     is_dragging: bool,
+    mouse_down_x: i32,
+    mouse_down_y: i32,
     drag_start_x: i32,
     drag_start_y: i32,
     drag_cur_x: i32,
@@ -528,10 +570,13 @@ struct AppState {
     pixels: Vec<u8>,
     bmp_width: i32,
     bmp_height: i32,
+    p1_rect_in_bmp: RECT,
+    p2_rect_in_bmp: Option<RECT>,
     last_draw_x: i32,
     last_draw_y: i32,
     status_msg: Option<String>,
     hover_tb_id: Option<u16>,
+    hovered_link: Option<LinkTarget>,
 
     input_mode: InputMode,
     ignore_next_char: bool,
@@ -541,7 +586,6 @@ struct AppState {
     active_match: usize,
     goto_input: String,
 
-    // 좌측 패널 (목차 + 페이지 썸네일 미리보기 탭)
     bookmarks: Vec<BookmarkItem>,
     show_sidebar: bool,
     sidebar_tab: SidebarTab,
@@ -589,6 +633,8 @@ impl AppState {
             pan_x: 0,
             pan_y: 0,
             is_dragging: false,
+            mouse_down_x: 0,
+            mouse_down_y: 0,
             drag_start_x: 0,
             drag_start_y: 0,
             drag_cur_x: 0,
@@ -597,10 +643,18 @@ impl AppState {
             pixels: Vec::new(),
             bmp_width: 0,
             bmp_height: 0,
+            p1_rect_in_bmp: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            p2_rect_in_bmp: None,
             last_draw_x: 0,
             last_draw_y: 0,
             status_msg: None,
             hover_tb_id: None,
+            hovered_link: None,
             input_mode: InputMode::Normal,
             ignore_next_char: false,
             text_prompt_buf: String::new(),
@@ -643,11 +697,166 @@ impl AppState {
         }
     }
 
+    /// 클라이언트 좌표(client_x, client_y) 아래에 있는 PDF 하이퍼링크(내부 페이지 점프 또는 외부 웹 URL)를 탐지합니다.
+    fn detect_link_at_client_pos(&self, client_x: i32, client_y: i32) -> Option<LinkTarget> {
+        if self.doc.is_null() || self.page_count <= 0 || self.bmp_width <= 0 {
+            return None;
+        }
+        let rel_x = client_x - self.last_draw_x;
+        let rel_y = client_y - self.last_draw_y;
+
+        // 1페이지 영역 히트 테스트
+        if rel_x >= self.p1_rect_in_bmp.left
+            && rel_x < self.p1_rect_in_bmp.right
+            && rel_y >= self.p1_rect_in_bmp.top
+            && rel_y < self.p1_rect_in_bmp.bottom
+        {
+            return self.query_link_on_page(
+                self.current_page,
+                rel_x - self.p1_rect_in_bmp.left,
+                rel_y - self.p1_rect_in_bmp.top,
+                self.p1_rect_in_bmp.right - self.p1_rect_in_bmp.left,
+                self.p1_rect_in_bmp.bottom - self.p1_rect_in_bmp.top,
+            );
+        }
+
+        // 2페이지 양면 보기 시 오른쪽 페이지 영역 히트 테스트
+        if let Some(p2_rc) = self.p2_rect_in_bmp {
+            if self.current_page + 1 < self.page_count
+                && rel_x >= p2_rc.left
+                && rel_x < p2_rc.right
+                && rel_y >= p2_rc.top
+                && rel_y < p2_rc.bottom
+            {
+                return self.query_link_on_page(
+                    self.current_page + 1,
+                    rel_x - p2_rc.left,
+                    rel_y - p2_rc.top,
+                    p2_rc.right - p2_rc.left,
+                    p2_rc.bottom - p2_rc.top,
+                );
+            }
+        }
+
+        None
+    }
+
+    fn query_link_on_page(
+        &self,
+        page_idx: i32,
+        dev_x: i32,
+        dev_y: i32,
+        size_x: i32,
+        size_y: i32,
+    ) -> Option<LinkTarget> {
+        if size_x <= 0 || size_y <= 0 {
+            return None;
+        }
+        unsafe {
+            let page = FPDF_LoadPage(self.doc, page_idx);
+            if page.is_null() {
+                return None;
+            }
+
+            let mut page_x: c_double = 0.0;
+            let mut page_y: c_double = 0.0;
+            FPDF_DeviceToPage(
+                page,
+                0,
+                0,
+                size_x,
+                size_y,
+                self.rotation,
+                dev_x,
+                dev_y,
+                &mut page_x,
+                &mut page_y,
+            );
+
+            let link = FPDFLink_GetLinkAtPoint(page, page_x, page_y);
+            let mut result = None;
+
+            if !link.is_null() {
+                // 1) 직접 목적지(Dest)가 지정된 내부 페이지 링크 확인
+                let dest = FPDFLink_GetDest(self.doc, link);
+                if !dest.is_null() {
+                    let target_p = FPDFDest_GetDestPageIndex(self.doc, dest);
+                    if target_p >= 0 {
+                        result = Some(LinkTarget::InternalPage(target_p));
+                    }
+                }
+
+                // 2) 액션(Action) 기반 링크 (GoTo 내부 이동 또는 URI 외부 웹 링크) 확인
+                if result.is_none() {
+                    let action = FPDFLink_GetAction(link);
+                    if !action.is_null() {
+                        let act_type = FPDFAction_GetType(action);
+                        if act_type == PDFACTION_GOTO {
+                            let act_dest = FPDFAction_GetDest(self.doc, action);
+                            if !act_dest.is_null() {
+                                let target_p = FPDFDest_GetDestPageIndex(self.doc, act_dest);
+                                if target_p >= 0 {
+                                    result = Some(LinkTarget::InternalPage(target_p));
+                                }
+                            }
+                        } else if act_type == PDFACTION_URI {
+                            let len = FPDFAction_GetURIPath(self.doc, action, null_mut(), 0);
+                            if len > 1 {
+                                let mut buf = vec![0u8; len as usize];
+                                FPDFAction_GetURIPath(
+                                    self.doc,
+                                    action,
+                                    buf.as_mut_ptr() as *mut c_void,
+                                    len,
+                                );
+                                if let Ok(cstr) = CStr::from_bytes_until_nul(&buf) {
+                                    let uri = cstr.to_string_lossy().trim().to_string();
+                                    if !uri.is_empty() {
+                                        result = Some(LinkTarget::ExternalUri(uri));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            FPDF_ClosePage(page);
+            result
+        }
+    }
+
+    fn execute_link_target(&mut self, target: &LinkTarget, hwnd: HWND) {
+        match target {
+            LinkTarget::InternalPage(target_page) => {
+                let p = *target_page;
+                self.go_to_page(p, hwnd);
+                self.status_msg = Some(format!("🔗 내부 링크 이동: {}페이지", p + 1));
+                update_window_title(hwnd, self);
+            }
+            LinkTarget::ExternalUri(uri) => {
+                let w_open = to_wstring("open");
+                let w_uri = to_wstring(uri);
+                unsafe {
+                    ShellExecuteW(
+                        hwnd,
+                        w_open.as_ptr(),
+                        w_uri.as_ptr(),
+                        null(),
+                        null(),
+                        SW_SHOWNORMAL,
+                    );
+                }
+                self.status_msg = Some(format!("🌐 외부 링크 열기: {}", uri));
+                update_window_title(hwnd, self);
+            }
+        }
+    }
+
     fn clear_thumbnail_cache(&mut self) {
         self.thumb_cache.clear();
     }
 
-    /// 지정된 페이지의 축소판 비트맵을 생성하고 캐시에 저장합니다.
     fn get_or_render_thumbnail(&mut self, page_idx: i32) -> Option<ThumbnailCache> {
         if let Some(cached) = self.thumb_cache.get(&page_idx) {
             return Some(cached.clone());
@@ -872,6 +1081,7 @@ impl AppState {
         self.pixels.clear();
         self.overlays.clear();
         self.clear_thumbnail_cache();
+        self.hovered_link = None;
         self.status_msg = None;
         self.input_mode = InputMode::Normal;
         self.search_query.clear();
@@ -1424,13 +1634,12 @@ impl AppState {
 
     fn show_help_dialog(&self, hwnd: HWND) {
         let help_text = "\
-[좌측 사이드바 탭 ([📑 목차] / [🖼 썸네일])]
-• 사이드바 상단 탭을 클릭해 [목차(Bookmarks)]와 [페이지 썸네일 미리보기]를 즉시 전환할 수 있습니다.
-• 썸네일 탭에서 각 페이지 축소판을 클릭하면 해당 페이지로 즉시 이동하며, 마우스 휠로 썸네일 목록을 스크롤할 수 있습니다.
+[본문 하이퍼링크 클릭 이동 (FPDFLink)]
+• 문서 본문 안의 목차 링크(내부 페이지 이동)나 웹 주소(https://...) 위에 마우스를 올리면 손가락 커서로 변경되며 하단 상태바에 대상 경로가 표시됩니다.
+• 해당 링크를 마우스로 클릭하면 목표 페이지로 즉시 점프하거나 기본 웹 브라우저가 실행됩니다.
 
-[상단 비주얼 도구 모음(Toolbar) 및 하단 상태바(Status Bar)]
-• 상단 툴바 버튼을 클릭하여 열기, 저장, 확대/축소, 폭맞춤, 양면, 다크모드, 목차/썸네일, 주석/교정 도구를 즉시 전환합니다.
-• 하단 상태바에서 문서 치수(cm/pt), 페이지 이동(처음/이전/점프/다음/끝), 보기 모드, 줌 배율, 전체화면을 클릭해 제어합니다.
+[좌측 사이드바 탭 ([📑 목차] / [🖼 썸네일])]
+• 사이드바 상단 탭을 클릭해 [목차(Bookmarks)]와 [페이지 썸네일 미리보기]를 즉시 전환하고 클릭 이동할 수 있습니다.
 
 [단축키 안내]
 • O: 열기 | S: BMP 저장 | Ctrl+S: PDF 저장 | C: 텍스트 복사 | I: 문서 정보 | H / F1: 도움말
@@ -1798,6 +2007,27 @@ impl AppState {
             };
             let total_h = target_h1.max(target_h2);
 
+            let y_off1 = (total_h - target_h1) / 2;
+            self.p1_rect_in_bmp = RECT {
+                left: 0,
+                top: y_off1,
+                right: target_w1,
+                bottom: y_off1 + target_h1,
+            };
+
+            if !page2.is_null() {
+                let x_off2 = target_w1 + gap;
+                let y_off2 = (total_h - target_h2) / 2;
+                self.p2_rect_in_bmp = Some(RECT {
+                    left: x_off2,
+                    top: y_off2,
+                    right: x_off2 + target_w2,
+                    bottom: y_off2 + target_h2,
+                });
+            } else {
+                self.p2_rect_in_bmp = None;
+            }
+
             if self.bmp_width == total_w && self.bmp_height == total_h && !self.pixels.is_empty() {
                 self.align_vertical_pan_if_needed(viewport_h);
                 if !page2.is_null() {
@@ -1820,7 +2050,6 @@ impl AppState {
             self.bmp_height = total_h;
             self.align_vertical_pan_if_needed(viewport_h);
 
-            let y_off1 = (total_h - target_h1) / 2;
             self.render_single_page_into_buffer(page1, 0, y_off1, target_w1, target_h1);
 
             let matches_p1 = self.search_matches.clone();
@@ -2099,9 +2328,9 @@ impl AppState {
             self.pan_y = 0;
             self.pending_align_top = self.fit_width;
             self.pending_align_bottom = false;
+            self.hovered_link = None;
             self.status_msg = None;
 
-            // 썸네일 탭이 열려 있을 때 현재 페이지가 화면 안에 보이도록 자동 스크롤 보정
             let mut rc: RECT = unsafe { zeroed() };
             unsafe { GetClientRect(hwnd, &mut rc) };
             let avail_h = (rc.bottom - rc.top) - self.top_bar_offset() - self.bottom_bar_offset();
@@ -2474,7 +2703,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     let bot_off = state.bottom_bar_offset();
     let panel_bottom = client_h - bot_off;
 
-    // 사이드바 전체 배경
     let panel_rc = RECT {
         left: 0,
         top: top_off,
@@ -2485,7 +2713,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     FillRect(hdc, &panel_rc, panel_brush);
     DeleteObject(panel_brush as _);
 
-    // 상단 탭 헤더 바 배경
     let tab_bar_rc = RECT {
         left: 0,
         top: top_off,
@@ -2496,7 +2723,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     FillRect(hdc, &tab_bar_rc, tab_bar_brush);
     DeleteObject(tab_bar_brush as _);
 
-    // 우측 경계선
     let border_rc = RECT {
         left: SIDEBAR_WIDTH - 1,
         top: top_off,
@@ -2511,7 +2737,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     let old_font = SelectObject(hdc, font);
     SetBkMode(hdc, TRANSPARENT as i32);
 
-    // 탭 버튼 2개 렌더링: [📑 목차] (0~122px) | [🖼 썸네일] (123~245px) | [✕] (246~279px)
     let is_bm_tab = state.sidebar_tab == SidebarTab::Bookmarks;
     let tab1_rc = RECT {
         left: 2,
@@ -2533,7 +2758,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     FillRect(hdc, &tab2_rc, tab2_br);
     DeleteObject(tab2_br as _);
 
-    // 활성 탭 상단 강조 라인
     let accent_rc = RECT {
         left: if is_bm_tab { 2 } else { 124 },
         top: top_off + 2,
@@ -2562,7 +2786,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
         .collect();
     TextOutW(hdc, 134, top_off + 10, t2_lbl.as_ptr(), t2_lbl.len() as i32);
 
-    // 닫기 [✕] 버튼
     SetTextColor(hdc, 0x00999999);
     let close_lbl: Vec<u16> = "✕".encode_utf16().collect();
     TextOutW(hdc, 256, top_off + 10, close_lbl.as_ptr(), close_lbl.len() as i32);
@@ -2681,7 +2904,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
                     let is_active = p_idx == state.current_page
                         || (state.spread_mode && p_idx == state.current_page + 1);
 
-                    // 카드 배경 및 테두리
                     let card_rc = RECT {
                         left: 16,
                         top: item_top,
@@ -2733,7 +2955,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
                         );
                     }
 
-                    // 하단 페이지 번호 캡션
                     SetTextColor(
                         hdc,
                         if is_active { 0x0000EAFF } else { 0x00DDDDDD },
@@ -2749,7 +2970,6 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
                     );
                 }
 
-                // 썸네일 우측 스크롤바 인디케이터
                 if total_pages > max_rows && avail_h > 40 {
                     let track_h = panel_bottom - content_top - 4;
                     let thumb_h = ((max_rows as f64 / total_pages as f64) * track_h as f64)
@@ -2935,13 +3155,26 @@ unsafe fn draw_bottom_status_bar(
         String::from("📐 문서 대기 중")
     };
 
-    let status_info = if let Some(ref msg) = state.status_msg {
+    // 하이퍼링크 위에 마우스가 올라가 있으면 URL/대상 페이지를 하단 상태바에 우선 표시
+    let status_info = if let Some(ref link) = state.hovered_link {
+        match link {
+            LinkTarget::InternalPage(p) => format!("🔗 내부 링크: {}페이지로 이동 (클릭)", p + 1),
+            LinkTarget::ExternalUri(uri) => format!("🌐 웹 링크: {} (클릭하여 열기)", uri),
+        }
+    } else if let Some(ref msg) = state.status_msg {
         format!("{}  |  💡 {}", dim_text, msg)
     } else {
         dim_text
     };
 
-    SetTextColor(hdc, 0x00CCCCCC);
+    SetTextColor(
+        hdc,
+        if state.hovered_link.is_some() {
+            0x0066EAFF
+        } else {
+            0x00CCCCCC
+        },
+    );
     let w_left: Vec<u16> = status_info.encode_utf16().collect();
     TextOutW(hdc, 10, top_y + 6, w_left.as_ptr(), w_left.len() as i32);
 
@@ -3308,7 +3541,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
         AppendMenuW(parent, MF_POPUP, sub as usize, w.as_ptr());
     };
 
-    // 1. [파일]
     let m_file = CreatePopupMenu();
     add_item(m_file, IDM_FILE_NEW_BLANK, "빈 PDF 생성(&N)");
     add_item(m_file, IDM_FILE_FROM_CLIPBOARD, "클립보드에서 PDF 생성(&B)");
@@ -3325,7 +3557,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_file, IDM_FILE_EXIT, "종료(&X)\tESC");
     add_sub(hmenu, m_file, "파일(&F)");
 
-    // 2. [편집]
     let m_edit = CreatePopupMenu();
     add_item(m_edit, IDM_EDIT_ADD_TEXT, "텍스트 추가(&T)...");
     add_sep(m_edit);
@@ -3343,9 +3574,8 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_edit, IDM_EDIT_BATES_NUMBER, "베이츠 번호(Bates #0001) 표시 토글");
     add_sub(hmenu, m_edit, "편집(&E)");
 
-    // 3. [주석]
     let m_annot = CreatePopupMenu();
-    add_item(m_annot, IDM_ANNOT_NONE, "기본 손 도구 (화면 이동 Pan 모드)");
+    add_item(m_annot, IDM_ANNOT_NONE, "기본 손 도구 (화면 이동 Pan 및 링크 클릭 모드)");
     add_sep(m_annot);
     add_item(m_annot, IDM_ANNOT_HIGHLIGHT, "강조 (형광펜 드래그)");
     add_item(m_annot, IDM_ANNOT_AREA_HL, "영역 강조 (사각 영역 하이라이트)");
@@ -3368,7 +3598,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_annot, IDM_ANNOT_CLEAR_ALL, "모든 사용자 주석 초기화");
     add_sub(hmenu, m_annot, "주석(&A)");
 
-    // 4. [변환]
     let m_conv = CreatePopupMenu();
     add_item(m_conv, IDM_CONV_TO_BMP, "이미지로 변환 (.bmp)...\tS");
     add_item(m_conv, IDM_CONV_TO_TXT, "텍스트로 변환 (.txt)...");
@@ -3379,7 +3608,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_conv, IDM_CONV_BATCH_TXT, "현재 페이지 텍스트 클립보드 복사\tC");
     add_sub(hmenu, m_conv, "변환(&C)");
 
-    // 5. [보기]
     let m_view = CreatePopupMenu();
     add_item(m_view, IDM_VIEW_ZOOM_IN, "확대(&I)\t+");
     add_item(m_view, IDM_VIEW_ZOOM_OUT, "축소(&O)\t-");
@@ -3403,7 +3631,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_view, IDM_VIEW_FULLSCREEN, "읽기 모드 / 전체 화면\tF11");
     add_sub(hmenu, m_view, "보기(&V)");
 
-    // 6. [구성 (페이지)]
     let m_org = CreatePopupMenu();
     add_item(m_org, IDM_ORG_INSERT_BLANK, "빈 페이지 삽입(&B)");
     add_item(m_org, IDM_ORG_INSERT_PDF, "다른 PDF에서 페이지 삽입(&I)...");
@@ -3416,7 +3643,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_org, IDM_ORG_ROTATE_PAGE_OBJ, "현재 페이지 자체 회전 (영구 반영)");
     add_sub(hmenu, m_org, "구성(&P)");
 
-    // 7. [도구]
     let m_tool = CreatePopupMenu();
     add_item(m_tool, IDM_TOOL_SEARCH, "문서 전체 키워드 검색(&F)...\tF");
     add_item(m_tool, IDM_TOOL_GOTO, "페이지 번호 직접 이동(&G)...\tG");
@@ -3430,7 +3656,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_tool, IDM_TOOL_SCREENSHOT, "현재 화면 스크린샷 클립보드 복사");
     add_sub(hmenu, m_tool, "도구(&T)");
 
-    // 8. [양식]
     let m_form = CreatePopupMenu();
     add_item(m_form, IDM_FORM_ADD_TEXTFIELD, "텍스트 필드 양식 추가 (드래그)");
     add_item(m_form, IDM_FORM_ADD_CHECKBOX, "체크 박스 양식 추가 (클릭)");
@@ -3439,7 +3664,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_form, IDM_FORM_EXPORT_CSV, "양식 데이터 추출 (.csv 저장)...");
     add_sub(hmenu, m_form, "양식(&M)");
 
-    // 9. [보안]
     let m_sec = CreatePopupMenu();
     add_item(m_sec, IDM_SEC_REDACT_TOOL, "교정 표시 도구 (드래그 영역 검은색 마스킹)");
     add_item(m_sec, IDM_SEC_SEARCH_REDACT, "검색 & 교정 (검색어 일괄 검은색 마스킹)...");
@@ -3447,7 +3671,6 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_sec, IDM_SEC_SIGN_STAMP, "디지털 서명 스탬프 삽입");
     add_sub(hmenu, m_sec, "보안(&S)");
 
-    // 10. [기타 / 테마]
     let m_etc = CreatePopupMenu();
     add_item(m_etc, IDM_THEME_DARK_DOC, "야간 독서용 다크 모드(색상 반전) 토글\tV");
     add_sep(m_etc);
@@ -3924,7 +4147,7 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
 
         IDM_ANNOT_NONE => {
             state.active_tool = ActiveTool::Pan;
-            state.status_msg = Some("기본 손 도구 (화면 드래그 이동 모드)".to_string());
+            state.status_msg = Some("기본 손 도구 (화면 드래그 이동 및 링크 클릭 모드)".to_string());
             state.refresh_view(hwnd, false);
         }
         IDM_ANNOT_HIGHLIGHT => {
@@ -4241,6 +4464,19 @@ unsafe extern "system" fn wnd_proc(
     match msg {
         WM_ERASEBKGND => 1,
 
+        WM_SETCURSOR => {
+            if !state_ptr.is_null() {
+                let state = &*state_ptr;
+                let hit_area = (lparam & 0xFFFF) as u16;
+                // HTCLIENT = 1
+                if hit_area == 1 && state.hovered_link.is_some() {
+                    SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+                    return 1;
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
         WM_COMMAND => {
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
@@ -4304,10 +4540,8 @@ unsafe extern "system" fn wnd_proc(
                     return 0;
                 }
 
-                // 좌측 사이드바 탭 전환 및 목차/썸네일 항목 클릭 처리
                 let top_off = state.top_bar_offset();
                 if state.show_sidebar && click_x < SIDEBAR_WIDTH {
-                    // 상단 탭 바 클릭 판별
                     if click_y >= top_off && click_y < top_off + SIDEBAR_TAB_HEIGHT {
                         if click_x >= 246 {
                             state.show_sidebar = false;
@@ -4379,6 +4613,8 @@ unsafe extern "system" fn wnd_proc(
                 }
 
                 state.is_dragging = true;
+                state.mouse_down_x = click_x;
+                state.mouse_down_y = click_y;
                 state.drag_start_x = click_x;
                 state.drag_start_y = click_y;
                 state.drag_cur_x = click_x;
@@ -4402,25 +4638,53 @@ unsafe extern "system" fn wnd_proc(
                 let cur_x = (lparam & 0xFFFF) as i16 as i32;
                 let cur_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
 
-                if !state.is_dragging && !state.is_fullscreen {
-                    let new_hover = if cur_y < TOOLBAR_HEIGHT {
-                        hit_test_toolbar(cur_x, cur_y)
+                if !state.is_dragging {
+                    // 1. 상단 툴바 호버 갱신
+                    if !state.is_fullscreen {
+                        let new_hover = if cur_y < TOOLBAR_HEIGHT {
+                            hit_test_toolbar(cur_x, cur_y)
+                        } else {
+                            None
+                        };
+                        if new_hover != state.hover_tb_id {
+                            state.hover_tb_id = new_hover;
+                            let tb_rc = RECT {
+                                left: 0,
+                                top: 0,
+                                right: 2000,
+                                bottom: TOOLBAR_HEIGHT,
+                            };
+                            InvalidateRect(hwnd, &tb_rc, 0);
+                        }
+                    }
+
+                    // 2. 본문 하이퍼링크 호버 탐지 (손 도구 모드일 때)
+                    let new_link = if state.active_tool == ActiveTool::Pan
+                        && cur_x >= state.sidebar_offset()
+                    {
+                        state.detect_link_at_client_pos(cur_x, cur_y)
                     } else {
                         None
                     };
-                    if new_hover != state.hover_tb_id {
-                        state.hover_tb_id = new_hover;
-                        let tb_rc = RECT {
-                            left: 0,
-                            top: 0,
-                            right: 2000,
-                            bottom: TOOLBAR_HEIGHT,
-                        };
-                        InvalidateRect(hwnd, &tb_rc, 0);
-                    }
-                }
 
-                if state.is_dragging {
+                    if new_link != state.hovered_link {
+                        state.hovered_link = new_link;
+                        if state.hovered_link.is_some() {
+                            SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+                        } else {
+                            SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
+                        }
+                        let mut rc: RECT = zeroed();
+                        GetClientRect(hwnd, &mut rc);
+                        let sb_rc = RECT {
+                            left: 0,
+                            top: (rc.bottom - rc.top) - STATUSBAR_HEIGHT,
+                            right: rc.right - rc.left,
+                            bottom: rc.bottom - rc.top,
+                        };
+                        InvalidateRect(hwnd, &sb_rc, 0);
+                    }
+                } else {
                     if state.active_tool == ActiveTool::Pan {
                         state.pan_x += cur_x - state.drag_start_x;
                         state.pan_y += cur_y - state.drag_start_y;
@@ -4452,10 +4716,20 @@ unsafe extern "system" fn wnd_proc(
                     let end_x = (lparam & 0xFFFF) as i16 as i32;
                     let end_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
 
-                    if state.active_tool != ActiveTool::Pan
-                        && state.bmp_width > 0
-                        && state.bmp_height > 0
-                    {
+                    // 손 도구 모드에서 드래그 이동 거리(4px 미만)가 거의 없는 순수 클릭이면 하이퍼링크 실행
+                    if state.active_tool == ActiveTool::Pan {
+                        let move_dist = (end_x - state.mouse_down_x)
+                            .abs()
+                            .max((end_y - state.mouse_down_y).abs());
+                        if move_dist < 4 {
+                            if let Some(target) = state.detect_link_at_client_pos(end_x, end_y) {
+                                state.execute_link_target(&target, hwnd);
+                            }
+                        }
+                        return 0;
+                    }
+
+                    if state.bmp_width > 0 && state.bmp_height > 0 {
                         let x1 = ((state.drag_start_x - state.last_draw_x) as f64
                             / state.bmp_width as f64)
                             .clamp(0.0, 1.0);
