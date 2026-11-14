@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pagecraft — 웹 문서 에디터</title>
+<link rel="stylesheet" href="editor.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#" aria-label="Pagecraft"><span class="brand-icon">P<span>↗</span></span>pagecraft<span class="edition">LOCAL EDITOR</span></a>
+  <div class="file-state"><span id="stateDot"></span><span id="saveState" role="status">준비됨</span></div>
+  <div class="top-actions"><button id="newDoc">새 문서</button><button id="openDoc">열기</button><button id="openFolder">폴더 열기</button><button id="zipSave">ZIP 다운로드</button><button class="primary" id="saveDoc">폴더에 저장 <span>↗</span></button></div>
+</header>
+<main>
+<section class="document-header"><div><div class="eyebrow">YOUR IDEAS, ON THE WEB</div><div class="title-line"><input id="docTitle" aria-label="문서 이름" value="나의 첫 웹페이지" maxlength="100"><span class="html-badge">.html</span></div><p>생각을 적으세요. 웹페이지가 됩니다.</p></div><div class="view-switch" aria-label="보기 모드"><button id="editMode" class="active">편집</button><button id="previewMode">미리보기</button></div></section>
+<section class="workspace">
+<div class="toolbar" id="toolbar" role="toolbar" aria-label="서식 도구">
+  <select id="blockFormat" aria-label="문단 스타일"><option value="p">본문</option><option value="h1">제목 1</option><option value="h2">제목 2</option><option value="h3">제목 3</option><option value="blockquote">인용문</option><option value="pre">코드</option></select><span class="divider"></span>
+  <button data-cmd="bold" aria-label="굵게" title="굵게 (Ctrl+B)"><b>B</b></button><button data-cmd="italic" aria-label="기울임" title="기울임 (Ctrl+I)"><i>I</i></button><button data-cmd="underline" aria-label="밑줄" title="밑줄 (Ctrl+U)"><u>U</u></button><button data-cmd="strikeThrough" aria-label="취소선"><s>S</s></button>
+  <label class="color-tool" title="글자 색상">A<input id="textColor" type="color" value="#25342c" aria-label="글자 색상"></label><span class="divider"></span>
+  <button data-cmd="justifyLeft" aria-label="왼쪽 정렬" title="왼쪽 정렬">☰</button><button data-cmd="justifyCenter" aria-label="가운데 정렬" title="가운데 정렬">≡</button><button data-cmd="justifyRight" aria-label="오른쪽 정렬" title="오른쪽 정렬">☷</button><span class="divider"></span>
+  <button data-cmd="insertUnorderedList" aria-label="글머리 목록" title="글머리 목록">• ≡</button><button data-cmd="insertOrderedList" aria-label="번호 목록" title="번호 목록">1. ≡</button><button id="linkBtn" title="링크 삽입">링크</button><button id="imageBtn" title="이미지 삽입">＋ 이미지</button><button id="tableBtn" title="3×3 표 삽입">표</button><span class="divider"></span><button data-cmd="undo" aria-label="실행 취소" title="실행 취소">↶</button><button data-cmd="redo" aria-label="다시 실행" title="다시 실행">↷</button><button data-cmd="removeFormat" title="서식 지우기">서식 지우기</button>
+</div>
+<div class="canvas-area"><div class="page-label"><span>WEB DOCUMENT</span><span id="pageModeLabel">클릭하고, 자유롭게 작성하세요</span></div><article id="editor" class="paper" contenteditable="true" spellcheck="false" aria-label="문서 편집 영역" role="textbox" aria-multiline="true"></article><iframe id="preview" title="저장될 웹페이지 미리보기" sandbox="" hidden></iframe><div class="canvas-footer"><span>문서의 모든 콘텐츠를 자유롭게 편집할 수 있어요.</span><span id="wordCount">0자</span></div></div>
+</section>
+<aside>
+  <div class="aside-title">문서 설정 <span>↗</span></div><label class="setting-label" for="pageWidth">페이지 너비</label><select id="pageWidth"><option value="860">기본 · 860px</option><option value="720">좁게 · 720px</option><option value="1080">넓게 · 1080px</option></select>
+  <label class="setting-label" for="pageColor">페이지 배경</label><div class="color-setting"><input type="color" id="pageColor" value="#ffffff"><span id="pageColorText">#FFFFFF</span></div>
+  <div id="imageSettings" hidden><div class="aside-rule"></div><div class="aside-title">선택한 이미지</div><label class="setting-label" for="imageAlt">이미지 설명</label><input id="imageAlt" placeholder="이미지 설명"><label class="setting-label" for="imageWidth">너비 <span id="imageWidthText">100%</span></label><input id="imageWidth" type="range" min="10" max="100" value="100"><button id="deleteImage" class="danger">이미지 삭제</button></div>
+  <div class="aside-rule"></div><div class="aside-title">저장되는 파일</div><div class="file-tree"><div>▤ <span id="fileName">나의 첫 웹페이지.html</span></div><div>▱ img/</div><small id="imageCount">이미지를 추가하면 이 폴더에 저장돼요.</small></div>
+  <div class="tip"><span>✳</span><strong>쓰는 순간, 웹페이지</strong><p>텍스트를 선택해 꾸미거나 이미지를 끌어 넣으세요. 저장한 HTML은 브라우저에서 바로 열립니다.</p></div><p class="privacy">◉ 문서는 이 PC에서 처리됩니다.<br>서버로 전송하지 않습니다.</p>
+</aside>
+</main>
+<footer class="app-footer"><span>PAGECRAFT <span class="footer-dot">·</span> 작은 생각에서 시작하는 웹</span><span>Ctrl + S 저장 <span class="footer-dot">/</span> 이미지 붙여넣기 지원</span></footer>
+<input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/bmp" multiple hidden><input id="htmlInput" type="file" accept=".html,.htm" hidden>
+<dialog id="linkDialog"><form method="dialog"><h2>링크 삽입</h2><label for="linkUrl">웹 주소</label><input id="linkUrl" type="url" placeholder="https://example.com" required><div class="dialog-actions"><button value="cancel" formnovalidate>취소</button><button value="insert" class="primary">삽입</button></div></form></dialog>
+<div id="toast" role="status" hidden></div>
+<script src="editor.js"></script>
+</body></html>

@@ -1,4 +1,13 @@
+﻿/target/
+Cargo.lock
 /dist/
-/releases/
-/vendor/pdfium.tgz
-/vendor/include/*.orig
+*.zip
+RELEASE_NOTES_*.md
+*.exe
+*.obj
+*.pdb
+*.ilk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
