@@ -1,5 +1,6 @@
 ﻿#![windows_subsystem = "windows"]
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::{c_void, CString};
 use std::fs::{self, File};
@@ -58,7 +59,9 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CF_BITMAP: u32 = 2;
 const CF_UNICODETEXT: u32 = 13;
 const SIDEBAR_WIDTH: i32 = 280;
+const SIDEBAR_TAB_HEIGHT: i32 = 34;
 const BOOKMARK_ROW_HEIGHT: i32 = 26;
+const THUMB_ITEM_HEIGHT: i32 = 216;
 const SPREAD_GAP: i32 = 16;
 const TOOLBAR_HEIGHT: i32 = 40;
 const STATUSBAR_HEIGHT: i32 = 28;
@@ -126,6 +129,7 @@ const IDM_VIEW_ROTATE_CCW: u16 = 5010;
 const IDM_VIEW_RULER: u16 = 5011;
 const IDM_VIEW_GRID: u16 = 5012;
 const IDM_VIEW_BOOKMARKS: u16 = 5013;
+const IDM_VIEW_THUMBNAILS: u16 = 5016;
 const IDM_VIEW_AUTO_BOOKMARK: u16 = 5014;
 const IDM_VIEW_FULLSCREEN: u16 = 5015;
 
@@ -162,7 +166,6 @@ const IDM_THEME_DARK_BG: u16 = 9503;
 const IDM_THEME_CLASSIC: u16 = 9504;
 const IDM_HELP_SHORTCUTS: u16 = 9505;
 
-// 툴바 전용 내부 페이지 이동 명령 ID
 const IDM_TB_PREV_PAGE: u16 = 9801;
 const IDM_TB_NEXT_PAGE: u16 = 9802;
 const IDM_TB_FIRST_PAGE: u16 = 9803;
@@ -318,7 +321,6 @@ extern "C" {
     fn FPDFPage_SetRotation(page: *mut c_void, rotate: c_int);
     fn FPDFPage_InsertObject(page: *mut c_void, page_obj: *mut c_void);
     fn FPDFPage_GenerateContent(page: *mut c_void) -> c_int;
-    
     fn FPDFText_SetText(text_object: *mut c_void, text: *const c_ushort) -> c_int;
     fn FPDFPageObj_Transform(
         page_object: *mut c_void,
@@ -392,6 +394,19 @@ struct BookmarkItem {
     title: String,
     page_index: i32,
     depth: usize,
+}
+
+#[derive(Clone)]
+struct ThumbnailCache {
+    width: i32,
+    height: i32,
+    pixels: Vec<u8>,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum SidebarTab {
+    Bookmarks,
+    Thumbnails,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -470,6 +485,7 @@ const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
     ToolbarButton { id: IDM_VIEW_SPREAD, label: "📖 2p양면", width: 74 },
     ToolbarButton { id: IDM_THEME_DARK_DOC, label: "🌙 다크", width: 64 },
     ToolbarButton { id: IDM_VIEW_BOOKMARKS, label: "📑 목차", width: 64 },
+    ToolbarButton { id: IDM_VIEW_THUMBNAILS, label: "🖼 썸네일", width: 74 },
     ToolbarButton { id: IDM_ANNOT_NONE, label: "✋ 이동", width: 64 },
     ToolbarButton { id: IDM_ANNOT_HIGHLIGHT, label: "🖍 강조", width: 64 },
     ToolbarButton { id: IDM_ANNOT_PENCIL, label: "✏ 연필", width: 64 },
@@ -525,9 +541,13 @@ struct AppState {
     active_match: usize,
     goto_input: String,
 
+    // 좌측 패널 (목차 + 페이지 썸네일 미리보기 탭)
     bookmarks: Vec<BookmarkItem>,
-    show_bookmarks: bool,
+    show_sidebar: bool,
+    sidebar_tab: SidebarTab,
     bookmark_scroll: usize,
+    thumb_scroll: usize,
+    thumb_cache: HashMap<i32, ThumbnailCache>,
 
     active_tool: ActiveTool,
     show_annotations: bool,
@@ -589,8 +609,11 @@ impl AppState {
             active_match: 0,
             goto_input: String::new(),
             bookmarks: Vec::new(),
-            show_bookmarks: false,
+            show_sidebar: false,
+            sidebar_tab: SidebarTab::Bookmarks,
             bookmark_scroll: 0,
+            thumb_scroll: 0,
+            thumb_cache: HashMap::new(),
             active_tool: ActiveTool::Pan,
             show_annotations: true,
             overlays: Vec::new(),
@@ -620,6 +643,72 @@ impl AppState {
         }
     }
 
+    fn clear_thumbnail_cache(&mut self) {
+        self.thumb_cache.clear();
+    }
+
+    /// 지정된 페이지의 축소판 비트맵을 생성하고 캐시에 저장합니다.
+    fn get_or_render_thumbnail(&mut self, page_idx: i32) -> Option<ThumbnailCache> {
+        if let Some(cached) = self.thumb_cache.get(&page_idx) {
+            return Some(cached.clone());
+        }
+        if self.doc.is_null() || page_idx < 0 || page_idx >= self.page_count {
+            return None;
+        }
+
+        unsafe {
+            let page = FPDF_LoadPage(self.doc, page_idx);
+            if page.is_null() {
+                return None;
+            }
+
+            let raw_w = FPDF_GetPageWidth(page);
+            let raw_h = FPDF_GetPageHeight(page);
+            let (pw, ph) = if self.rotation % 2 == 1 {
+                (raw_h, raw_w)
+            } else {
+                (raw_w, raw_h)
+            };
+
+            let max_w = 156.0;
+            let max_h = 176.0;
+            let scale = (max_w / pw.max(1.0)).min(max_h / ph.max(1.0));
+            let tw = ((pw * scale) as i32).clamp(24, 180);
+            let th = ((ph * scale) as i32).clamp(24, 190);
+
+            let bitmap = FPDFBitmap_Create(tw, th, 1);
+            if bitmap.is_null() {
+                FPDF_ClosePage(page);
+                return None;
+            }
+
+            FPDFBitmap_FillRect(bitmap, 0, 0, tw, th, 0xFFFFFFFF);
+            FPDF_RenderPageBitmap(bitmap, page, 0, 0, tw, th, self.rotation, FPDF_ANNOT);
+
+            let buffer = FPDFBitmap_GetBuffer(bitmap);
+            let stride = FPDFBitmap_GetStride(bitmap) as usize;
+            let row_bytes = (tw * 4) as usize;
+            let mut pixels = vec![0u8; row_bytes * (th as usize)];
+
+            for y in 0..(th as usize) {
+                let src = buffer.add(y * stride);
+                let dst = pixels.as_mut_ptr().add(y * row_bytes);
+                copy_nonoverlapping(src, dst, row_bytes);
+            }
+
+            FPDFBitmap_Destroy(bitmap);
+            FPDF_ClosePage(page);
+
+            let entry = ThumbnailCache {
+                width: tw,
+                height: th,
+                pixels,
+            };
+            self.thumb_cache.insert(page_idx, entry.clone());
+            Some(entry)
+        }
+    }
+
     fn create_blank_pdf(&mut self, hwnd: HWND) {
         unsafe {
             let new_doc = FPDF_CreateNewDocument();
@@ -642,7 +731,8 @@ impl AppState {
             self.current_page = 0;
             self.overlays.clear();
             self.bookmarks.clear();
-            self.show_bookmarks = false;
+            self.clear_thumbnail_cache();
+            self.thumb_scroll = 0;
             self.status_msg = Some("새 빈 PDF 문서(A4)가 생성되었습니다".to_string());
             self.refresh_view(hwnd, true);
         }
@@ -667,6 +757,7 @@ impl AppState {
                 FPDF_ClosePage(page);
             }
         }
+        self.clear_thumbnail_cache();
         self.status_msg = Some("클립보드 텍스트로부터 PDF 생성 완료".to_string());
         self.refresh_view(hwnd, true);
     }
@@ -687,10 +778,12 @@ impl AppState {
         if hmod.is_null() {
             return;
         }
-        type CreateTextObjFn = unsafe extern "C" fn(*mut c_void, *const c_char, c_float) -> *mut c_void;
+        type CreateTextObjFn =
+            unsafe extern "C" fn(*mut c_void, *const c_char, c_float) -> *mut c_void;
         let sym1 = CString::new("FPDFPageObj_NewTextObj").unwrap();
         let sym2 = CString::new("FPDFPageObj_CreateNewTextObj").unwrap();
-        let proc = GetProcAddress(hmod, (sym1.as_ptr() as *const u8)).or_else(|| GetProcAddress(hmod, (sym2.as_ptr() as *const u8)));
+        let proc = GetProcAddress(hmod, sym1.as_ptr() as *const u8)
+            .or_else(|| GetProcAddress(hmod, sym2.as_ptr() as *const u8));
         if let Some(f) = proc {
             let create_fn: CreateTextObjFn = std::mem::transmute(f);
             let text_obj = create_fn(doc, font_name.as_ptr(), size);
@@ -778,6 +871,7 @@ impl AppState {
         self.pending_align_bottom = false;
         self.pixels.clear();
         self.overlays.clear();
+        self.clear_thumbnail_cache();
         self.status_msg = None;
         self.input_mode = InputMode::Normal;
         self.search_query.clear();
@@ -785,6 +879,7 @@ impl AppState {
         self.active_match = 0;
         self.goto_input.clear();
         self.bookmark_scroll = 0;
+        self.thumb_scroll = 0;
 
         self.file_name = Path::new(path)
             .file_name()
@@ -818,7 +913,8 @@ impl AppState {
                 }
             }
         }
-        self.show_bookmarks = true;
+        self.show_sidebar = true;
+        self.sidebar_tab = SidebarTab::Bookmarks;
         self.bookmark_scroll = 0;
         self.status_msg = Some(format!(
             "자동 북마크 생성 완료 ({}개 항목)",
@@ -839,6 +935,7 @@ impl AppState {
                 FPDF_ClosePage(new_page);
                 self.page_count = FPDF_GetPageCount(self.doc);
                 self.current_page = insert_idx;
+                self.clear_thumbnail_cache();
                 self.status_msg = Some(format!("{}페이지에 빈 페이지 삽입 완료", insert_idx + 1));
                 self.refresh_view(hwnd, true);
             }
@@ -857,6 +954,7 @@ impl AppState {
             if self.current_page >= self.page_count {
                 self.current_page = (self.page_count - 1).max(0);
             }
+            self.clear_thumbnail_cache();
             self.status_msg = Some(format!(
                 "페이지 삭제 완료 (현재 총 {}페이지)",
                 self.page_count
@@ -899,6 +997,7 @@ impl AppState {
 
             if ok != 0 {
                 self.page_count = FPDF_GetPageCount(self.doc);
+                self.clear_thumbnail_cache();
                 self.status_msg = Some(format!(
                     "PDF 병합/삽입 완료! (총 {}페이지)",
                     self.page_count
@@ -967,6 +1066,7 @@ impl AppState {
                 FPDFPage_SetCropBox(page, mx, my, w - mx, h - my);
                 FPDFPage_GenerateContent(page);
                 FPDF_ClosePage(page);
+                self.thumb_cache.remove(&self.current_page);
                 self.status_msg = Some("현재 페이지 여백 자르기(CropBox) 적용 완료".to_string());
                 self.refresh_view(hwnd, true);
             }
@@ -999,6 +1099,7 @@ impl AppState {
                 FPDFPage_GenerateContent(page);
                 FPDFPage_Flatten(page, 0);
                 FPDF_ClosePage(page);
+                self.thumb_cache.remove(&self.current_page);
                 self.status_msg =
                     Some("현재 페이지 주석/양식/교정 평면화(Flatten) 완료".to_string());
                 self.refresh_view(hwnd, true);
@@ -1323,21 +1424,18 @@ impl AppState {
 
     fn show_help_dialog(&self, hwnd: HWND) {
         let help_text = "\
-[상단 비주얼 도구 모음(Toolbar) 및 하단 상태바(Status Bar)]
-• 상단 툴바 버튼을 클릭하여 열기, 저장, 확대/축소, 폭맞춤, 양면, 다크모드, 목차, 주석/교정 도구를 즉시 전환할 수 있습니다.
-• 하단 상태바에서 문서 치수(cm/pt), 페이지 이동(처음/이전/페이지점프/다음/끝), 보기 모드, 줌 배율, 전체화면을 클릭해 제어할 수 있습니다.
+[좌측 사이드바 탭 ([📑 목차] / [🖼 썸네일])]
+• 사이드바 상단 탭을 클릭해 [목차(Bookmarks)]와 [페이지 썸네일 미리보기]를 즉시 전환할 수 있습니다.
+• 썸네일 탭에서 각 페이지 축소판을 클릭하면 해당 페이지로 즉시 이동하며, 마우스 휠로 썸네일 목록을 스크롤할 수 있습니다.
 
-[상단 메뉴바 안내 (알PDF 4.0 매뉴얼 10대 탭)]
-• [파일] : 빈 PDF 생성, 클립보드에서 생성, 열기(O), 저장/다른 버전 저장(1.4/1.7), 인쇄, 파일 속성(I)
-• [편집] : 텍스트 추가, 워터마크(기밀/SAMPLE/사용자지정), 배경화면 색상, 머리글&바닥글, 페이지/베이츠 번호
-• [주석] : 강조(형광펜), 영역 강조, 연필, 지우개, 밑줄, 취소선, 직사각형/선, 스탬프, 노트, 거리/영역 측정
-• [변환] : 이미지(BMP), 텍스트(TXT), 웹(HTML), Word 호환(RTF), Excel 호환(CSV) 변환
-• [보기] : 확대/축소, 실제크기, 폭맞춤(W), 단면/양면(D)/표지보기, 회전(R), 눈금자/격자, 북마크(B)/자동북마크, 전체화면(F11)
-• [구성] : 빈 페이지 삽입, 다른 PDF 삽입, 페이지 삭제, 현재 페이지 추출, 여백 자르기
-• [도구] : 키워드 검색(F), 페이지 이동(G), PDF 병합, PDF 비교(VS), 평면화(Flatten), 표 인식, 스크린샷(Ctrl+F1)
-• [양식] : 텍스트 필드/체크박스 추가, 양식 인식, 양식 데이터 CSV 추출
-• [보안] : 마우스 드래그 교정 표시(검은색 마스킹), 검색어 일괄 교정(Search & Redact), 숨겨진 데이터 점검
-• [기타] : 다크 모드(V), 테마 색상(라이트/다크/클래식), 단축키 도움말(H/F1)";
+[상단 비주얼 도구 모음(Toolbar) 및 하단 상태바(Status Bar)]
+• 상단 툴바 버튼을 클릭하여 열기, 저장, 확대/축소, 폭맞춤, 양면, 다크모드, 목차/썸네일, 주석/교정 도구를 즉시 전환합니다.
+• 하단 상태바에서 문서 치수(cm/pt), 페이지 이동(처음/이전/점프/다음/끝), 보기 모드, 줌 배율, 전체화면을 클릭해 제어합니다.
+
+[단축키 안내]
+• O: 열기 | S: BMP 저장 | Ctrl+S: PDF 저장 | C: 텍스트 복사 | I: 문서 정보 | H / F1: 도움말
+• Home / End: 첫 페이지 / 마지막 페이지 | G: 페이지 이동 | B: 사이드바 토글 | [ / ]: 이전/다음 북마크
+• W: 창 너비 맞춤 | D: 2p 양면 보기 | V: 다크 모드 | R / Shift+R: 90° 회전 | F11: 전체 화면 | F: 전체 검색";
 
         let w_help = to_wstring(help_text);
         let w_caption = to_wstring(&format!(
@@ -1363,7 +1461,8 @@ impl AppState {
             Self::collect_bookmarks_recursive(self.doc, null_mut(), 0, &mut self.bookmarks);
         }
         if !self.bookmarks.is_empty() {
-            self.show_bookmarks = true;
+            self.show_sidebar = true;
+            self.sidebar_tab = SidebarTab::Bookmarks;
         }
     }
 
@@ -1593,7 +1692,7 @@ impl AppState {
     }
 
     fn sidebar_offset(&self) -> i32 {
-        if self.show_bookmarks {
+        if self.show_sidebar {
             SIDEBAR_WIDTH
         } else {
             0
@@ -2001,6 +2100,17 @@ impl AppState {
             self.pending_align_top = self.fit_width;
             self.pending_align_bottom = false;
             self.status_msg = None;
+
+            // 썸네일 탭이 열려 있을 때 현재 페이지가 화면 안에 보이도록 자동 스크롤 보정
+            let mut rc: RECT = unsafe { zeroed() };
+            unsafe { GetClientRect(hwnd, &mut rc) };
+            let avail_h = (rc.bottom - rc.top) - self.top_bar_offset() - self.bottom_bar_offset();
+            let visible_thumbs = ((avail_h - SIDEBAR_TAB_HEIGHT) / THUMB_ITEM_HEIGHT).max(1) as usize;
+            let cur_u = next as usize;
+            if cur_u < self.thumb_scroll || cur_u >= self.thumb_scroll + visible_thumbs {
+                self.thumb_scroll = cur_u.saturating_sub(visible_thumbs / 2);
+            }
+
             if !self.search_query.is_empty() {
                 self.perform_search(false);
             }
@@ -2030,25 +2140,43 @@ impl AppState {
         update_window_title(hwnd, self);
     }
 
-    fn scroll_bookmarks(&mut self, wheel_delta: i16, hwnd: HWND) {
-        if self.bookmarks.is_empty() {
-            return;
-        }
+    fn scroll_sidebar(&mut self, wheel_delta: i16, hwnd: HWND) {
         unsafe {
             let mut rc: RECT = zeroed();
             GetClientRect(hwnd, &mut rc);
             let client_h = rc.bottom - rc.top;
             let avail_h = client_h - self.top_bar_offset() - self.bottom_bar_offset();
-            let max_rows = ((avail_h - 36) / BOOKMARK_ROW_HEIGHT).max(1) as usize;
-            let max_scroll = self.bookmarks.len().saturating_sub(max_rows);
 
-            let step = 3usize;
-            if wheel_delta < 0 {
-                self.bookmark_scroll = (self.bookmark_scroll + step).min(max_scroll);
-            } else if wheel_delta > 0 {
-                self.bookmark_scroll = self.bookmark_scroll.saturating_sub(step);
+            match self.sidebar_tab {
+                SidebarTab::Bookmarks => {
+                    if self.bookmarks.is_empty() {
+                        return;
+                    }
+                    let max_rows =
+                        ((avail_h - SIDEBAR_TAB_HEIGHT) / BOOKMARK_ROW_HEIGHT).max(1) as usize;
+                    let max_scroll = self.bookmarks.len().saturating_sub(max_rows);
+                    let step = 3usize;
+                    if wheel_delta < 0 {
+                        self.bookmark_scroll = (self.bookmark_scroll + step).min(max_scroll);
+                    } else if wheel_delta > 0 {
+                        self.bookmark_scroll = self.bookmark_scroll.saturating_sub(step);
+                    }
+                }
+                SidebarTab::Thumbnails => {
+                    if self.page_count <= 0 {
+                        return;
+                    }
+                    let max_rows =
+                        ((avail_h - SIDEBAR_TAB_HEIGHT) / THUMB_ITEM_HEIGHT).max(1) as usize;
+                    let max_scroll = (self.page_count as usize).saturating_sub(max_rows);
+                    let step = 1usize;
+                    if wheel_delta < 0 {
+                        self.thumb_scroll = (self.thumb_scroll + step).min(max_scroll);
+                    } else if wheel_delta > 0 {
+                        self.thumb_scroll = self.thumb_scroll.saturating_sub(step);
+                    }
+                }
             }
-
             InvalidateRect(hwnd, null(), 0);
         }
     }
@@ -2242,6 +2370,7 @@ impl AppState {
         } else {
             (self.rotation + 3) % 4
         };
+        self.clear_thumbnail_cache();
         self.pan_x = 0;
         self.pan_y = 0;
         self.pending_align_top = self.fit_width;
@@ -2270,6 +2399,7 @@ impl AppState {
         self.fit_width = false;
         self.pan_x = 0;
         self.pan_y = 0;
+        self.clear_thumbnail_cache();
         self.status_msg = None;
         self.refresh_view(hwnd, true);
     }
@@ -2312,7 +2442,12 @@ impl AppState {
             IDM_VIEW_FIT_WIDTH => self.fit_width,
             IDM_VIEW_SPREAD => self.spread_mode,
             IDM_THEME_DARK_DOC => self.dark_mode,
-            IDM_VIEW_BOOKMARKS => self.show_bookmarks,
+            IDM_VIEW_BOOKMARKS => {
+                self.show_sidebar && self.sidebar_tab == SidebarTab::Bookmarks
+            }
+            IDM_VIEW_THUMBNAILS => {
+                self.show_sidebar && self.sidebar_tab == SidebarTab::Thumbnails
+            }
             IDM_ANNOT_NONE => self.active_tool == ActiveTool::Pan,
             IDM_ANNOT_HIGHLIGHT => self.active_tool == ActiveTool::Highlight,
             IDM_ANNOT_PENCIL => self.active_tool == ActiveTool::Pencil,
@@ -2332,7 +2467,315 @@ impl Drop for AppState {
 }
 
 // ============================================================================
-// 상단 툴바 & 하단 상태바 렌더링 및 마우스 클릭 히트 테스트
+// 좌측 사이드바 ([📑 목차] / [🖼 썸네일] 탭 전환 및 축소판 렌더링)
+// ============================================================================
+unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut AppState) {
+    let top_off = state.top_bar_offset();
+    let bot_off = state.bottom_bar_offset();
+    let panel_bottom = client_h - bot_off;
+
+    // 사이드바 전체 배경
+    let panel_rc = RECT {
+        left: 0,
+        top: top_off,
+        right: SIDEBAR_WIDTH,
+        bottom: panel_bottom,
+    };
+    let panel_brush = CreateSolidBrush(0x00252526);
+    FillRect(hdc, &panel_rc, panel_brush);
+    DeleteObject(panel_brush as _);
+
+    // 상단 탭 헤더 바 배경
+    let tab_bar_rc = RECT {
+        left: 0,
+        top: top_off,
+        right: SIDEBAR_WIDTH,
+        bottom: top_off + SIDEBAR_TAB_HEIGHT,
+    };
+    let tab_bar_brush = CreateSolidBrush(0x001B1B1C);
+    FillRect(hdc, &tab_bar_rc, tab_bar_brush);
+    DeleteObject(tab_bar_brush as _);
+
+    // 우측 경계선
+    let border_rc = RECT {
+        left: SIDEBAR_WIDTH - 1,
+        top: top_off,
+        right: SIDEBAR_WIDTH,
+        bottom: panel_bottom,
+    };
+    let border_brush = CreateSolidBrush(0x00454545);
+    FillRect(hdc, &border_rc, border_brush);
+    DeleteObject(border_brush as _);
+
+    let font = GetStockObject(DEFAULT_GUI_FONT);
+    let old_font = SelectObject(hdc, font);
+    SetBkMode(hdc, TRANSPARENT as i32);
+
+    // 탭 버튼 2개 렌더링: [📑 목차] (0~122px) | [🖼 썸네일] (123~245px) | [✕] (246~279px)
+    let is_bm_tab = state.sidebar_tab == SidebarTab::Bookmarks;
+    let tab1_rc = RECT {
+        left: 2,
+        top: top_off + 2,
+        right: 122,
+        bottom: top_off + SIDEBAR_TAB_HEIGHT - 1,
+    };
+    let tab1_br = CreateSolidBrush(if is_bm_tab { 0x0037373D } else { 0x00222224 });
+    FillRect(hdc, &tab1_rc, tab1_br);
+    DeleteObject(tab1_br as _);
+
+    let tab2_rc = RECT {
+        left: 124,
+        top: top_off + 2,
+        right: 246,
+        bottom: top_off + SIDEBAR_TAB_HEIGHT - 1,
+    };
+    let tab2_br = CreateSolidBrush(if !is_bm_tab { 0x0037373D } else { 0x00222224 });
+    FillRect(hdc, &tab2_rc, tab2_br);
+    DeleteObject(tab2_br as _);
+
+    // 활성 탭 상단 강조 라인
+    let accent_rc = RECT {
+        left: if is_bm_tab { 2 } else { 124 },
+        top: top_off + 2,
+        right: if is_bm_tab { 122 } else { 246 },
+        bottom: top_off + 5,
+    };
+    let accent_br = CreateSolidBrush(0x00FFAA00);
+    FillRect(hdc, &accent_rc, accent_br);
+    DeleteObject(accent_br as _);
+
+    SetTextColor(
+        hdc,
+        if is_bm_tab { 0x0080D8FF } else { 0x00AAAAAA },
+    );
+    let t1_lbl: Vec<u16> = format!("📑 목차 ({})", state.bookmarks.len())
+        .encode_utf16()
+        .collect();
+    TextOutW(hdc, 14, top_off + 10, t1_lbl.as_ptr(), t1_lbl.len() as i32);
+
+    SetTextColor(
+        hdc,
+        if !is_bm_tab { 0x0080D8FF } else { 0x00AAAAAA },
+    );
+    let t2_lbl: Vec<u16> = format!("🖼 썸네일 ({})", state.page_count)
+        .encode_utf16()
+        .collect();
+    TextOutW(hdc, 134, top_off + 10, t2_lbl.as_ptr(), t2_lbl.len() as i32);
+
+    // 닫기 [✕] 버튼
+    SetTextColor(hdc, 0x00999999);
+    let close_lbl: Vec<u16> = "✕".encode_utf16().collect();
+    TextOutW(hdc, 256, top_off + 10, close_lbl.as_ptr(), close_lbl.len() as i32);
+
+    let content_top = top_off + SIDEBAR_TAB_HEIGHT + 4;
+    let avail_h = (panel_bottom - content_top).max(26);
+
+    match state.sidebar_tab {
+        SidebarTab::Bookmarks => {
+            let max_rows = (avail_h / BOOKMARK_ROW_HEIGHT).max(1) as usize;
+            let total_bm = state.bookmarks.len();
+            let max_scroll = total_bm.saturating_sub(max_rows);
+            if state.bookmark_scroll > max_scroll {
+                state.bookmark_scroll = max_scroll;
+            }
+
+            if state.bookmarks.is_empty() {
+                SetTextColor(hdc, 0x00AAAAAA);
+                let empty_msg: Vec<u16> =
+                    "목차 없음 ([보기 > 자동 북마크] 가능)".encode_utf16().collect();
+                TextOutW(
+                    hdc,
+                    12,
+                    content_top + 12,
+                    empty_msg.as_ptr(),
+                    empty_msg.len() as i32,
+                );
+            } else {
+                for (i, bm) in state
+                    .bookmarks
+                    .iter()
+                    .enumerate()
+                    .skip(state.bookmark_scroll)
+                    .take(max_rows)
+                {
+                    let row_idx = i - state.bookmark_scroll;
+                    let y_top = content_top + (row_idx as i32) * BOOKMARK_ROW_HEIGHT;
+                    let is_current = bm.page_index == state.current_page
+                        || (state.spread_mode && bm.page_index == state.current_page + 1);
+
+                    if is_current {
+                        let active_rc = RECT {
+                            left: 2,
+                            top: y_top,
+                            right: SIDEBAR_WIDTH - 6,
+                            bottom: y_top + BOOKMARK_ROW_HEIGHT - 1,
+                        };
+                        let active_brush = CreateSolidBrush(0x005A3D1C);
+                        FillRect(hdc, &active_rc, active_brush);
+                        DeleteObject(active_brush as _);
+                        SetTextColor(hdc, 0x0000EAFF);
+                    } else {
+                        SetTextColor(hdc, 0x00E6E6E6);
+                    }
+
+                    let indent = (bm.depth.min(5) as i32) * 12;
+                    let label = if bm.page_index >= 0 {
+                        format!("[p.{}] {}", bm.page_index + 1, bm.title)
+                    } else {
+                        bm.title.clone()
+                    };
+                    let w_label: Vec<u16> = label.encode_utf16().collect();
+                    TextOutW(
+                        hdc,
+                        10 + indent,
+                        y_top + 5,
+                        w_label.as_ptr(),
+                        w_label.len() as i32,
+                    );
+                }
+
+                if total_bm > max_rows && avail_h > 40 {
+                    let track_h = panel_bottom - content_top - 4;
+                    let thumb_h =
+                        ((max_rows as f64 / total_bm as f64) * track_h as f64).max(24.0) as i32;
+                    let scroll_ratio = state.bookmark_scroll as f64 / max_scroll.max(1) as f64;
+                    let thumb_top = content_top + ((track_h - thumb_h) as f64 * scroll_ratio) as i32;
+
+                    let thumb_rc = RECT {
+                        left: SIDEBAR_WIDTH - 5,
+                        top: thumb_top,
+                        right: SIDEBAR_WIDTH - 2,
+                        bottom: thumb_top + thumb_h,
+                    };
+                    let thumb_brush = CreateSolidBrush(0x00888888);
+                    FillRect(hdc, &thumb_rc, thumb_brush);
+                    DeleteObject(thumb_brush as _);
+                }
+            }
+        }
+        SidebarTab::Thumbnails => {
+            let max_rows = (avail_h / THUMB_ITEM_HEIGHT).max(1) as usize;
+            let total_pages = state.page_count.max(0) as usize;
+            let max_scroll = total_pages.saturating_sub(max_rows);
+            if state.thumb_scroll > max_scroll {
+                state.thumb_scroll = max_scroll;
+            }
+
+            if total_pages == 0 {
+                SetTextColor(hdc, 0x00AAAAAA);
+                let empty_msg: Vec<u16> = "열려 있는 문서가 없습니다.".encode_utf16().collect();
+                TextOutW(
+                    hdc,
+                    16,
+                    content_top + 16,
+                    empty_msg.as_ptr(),
+                    empty_msg.len() as i32,
+                );
+            } else {
+                let start_idx = state.thumb_scroll;
+                let end_idx = (start_idx + max_rows).min(total_pages);
+
+                for (slot, page_u) in (start_idx..end_idx).enumerate() {
+                    let p_idx = page_u as i32;
+                    let item_top = content_top + (slot as i32) * THUMB_ITEM_HEIGHT + 4;
+                    let is_active = p_idx == state.current_page
+                        || (state.spread_mode && p_idx == state.current_page + 1);
+
+                    // 카드 배경 및 테두리
+                    let card_rc = RECT {
+                        left: 16,
+                        top: item_top,
+                        right: SIDEBAR_WIDTH - 18,
+                        bottom: item_top + THUMB_ITEM_HEIGHT - 10,
+                    };
+                    let card_bg = CreateSolidBrush(if is_active { 0x004E371B } else { 0x002E2E32 });
+                    FillRect(hdc, &card_rc, card_bg);
+                    DeleteObject(card_bg as _);
+
+                    if let Some(thumb) = state.get_or_render_thumbnail(p_idx) {
+                        let tx = 16 + ((SIDEBAR_WIDTH - 34) - thumb.width) / 2;
+                        let ty = item_top + 6 + (176 - thumb.height) / 2;
+
+                        if is_active {
+                            let frame_rc = RECT {
+                                left: tx - 3,
+                                top: ty - 3,
+                                right: tx + thumb.width + 3,
+                                bottom: ty + thumb.height + 3,
+                            };
+                            let frame_br = CreateSolidBrush(0x0000B4FF);
+                            FillRect(hdc, &frame_rc, frame_br);
+                            DeleteObject(frame_br as _);
+                        }
+
+                        let mut bmi: BITMAPINFO = zeroed();
+                        bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+                        bmi.bmiHeader.biWidth = thumb.width;
+                        bmi.bmiHeader.biHeight = -thumb.height;
+                        bmi.bmiHeader.biPlanes = 1;
+                        bmi.bmiHeader.biBitCount = 32;
+                        bmi.bmiHeader.biCompression = BI_RGB;
+
+                        StretchDIBits(
+                            hdc,
+                            tx,
+                            ty,
+                            thumb.width,
+                            thumb.height,
+                            0,
+                            0,
+                            thumb.width,
+                            thumb.height,
+                            thumb.pixels.as_ptr() as *const c_void,
+                            &bmi,
+                            DIB_RGB_COLORS,
+                            SRCCOPY,
+                        );
+                    }
+
+                    // 하단 페이지 번호 캡션
+                    SetTextColor(
+                        hdc,
+                        if is_active { 0x0000EAFF } else { 0x00DDDDDD },
+                    );
+                    let p_lbl = format!("- {} -", p_idx + 1);
+                    let w_p: Vec<u16> = p_lbl.encode_utf16().collect();
+                    TextOutW(
+                        hdc,
+                        SIDEBAR_WIDTH / 2 - 20,
+                        item_top + THUMB_ITEM_HEIGHT - 28,
+                        w_p.as_ptr(),
+                        w_p.len() as i32,
+                    );
+                }
+
+                // 썸네일 우측 스크롤바 인디케이터
+                if total_pages > max_rows && avail_h > 40 {
+                    let track_h = panel_bottom - content_top - 4;
+                    let thumb_h = ((max_rows as f64 / total_pages as f64) * track_h as f64)
+                        .max(24.0) as i32;
+                    let scroll_ratio = state.thumb_scroll as f64 / max_scroll.max(1) as f64;
+                    let thumb_top = content_top + ((track_h - thumb_h) as f64 * scroll_ratio) as i32;
+
+                    let thumb_rc = RECT {
+                        left: SIDEBAR_WIDTH - 5,
+                        top: thumb_top,
+                        right: SIDEBAR_WIDTH - 2,
+                        bottom: thumb_top + thumb_h,
+                    };
+                    let thumb_brush = CreateSolidBrush(0x00888888);
+                    FillRect(hdc, &thumb_rc, thumb_brush);
+                    DeleteObject(thumb_brush as _);
+                }
+            }
+        }
+    }
+
+    SelectObject(hdc, old_font);
+}
+
+// ============================================================================
+// 상단 툴바 & 하단 상태바 렌더링
 // ============================================================================
 fn hit_test_toolbar(click_x: i32, click_y: i32) -> Option<u16> {
     if !(4..=TOOLBAR_HEIGHT - 4).contains(&click_y) {
@@ -2416,7 +2859,6 @@ unsafe fn draw_top_toolbar(hdc: *mut c_void, client_w: i32, state: &AppState) {
 
 fn hit_test_status_bar(click_x: i32, client_w: i32) -> Option<u16> {
     let center_x = client_w / 2;
-    // 중앙 네비게이션 컨트롤 히트 테스트: [⏮] [◀] [ p / total ] [▶] [⏭]
     if (center_x - 135..center_x - 100).contains(&click_x) {
         return Some(IDM_TB_FIRST_PAGE);
     }
@@ -2433,7 +2875,6 @@ fn hit_test_status_bar(click_x: i32, client_w: i32) -> Option<u16> {
         return Some(IDM_TB_LAST_PAGE);
     }
 
-    // 우측 보기/배율/전체화면 컨트롤 히트 테스트
     if (client_w - 295..client_w - 220).contains(&click_x) {
         return Some(IDM_VIEW_SPREAD);
     }
@@ -2483,7 +2924,6 @@ unsafe fn draw_bottom_status_bar(
     let old_font = SelectObject(hdc, font);
     SetBkMode(hdc, TRANSPARENT as i32);
 
-    // 1. 좌측: 페이지 제원(cm / pt) 및 상태 메시지
     let w_cm = state.cur_page_w_pt * 2.54 / 72.0;
     let h_cm = state.cur_page_h_pt * 2.54 / 72.0;
     let dim_text = if state.page_count > 0 {
@@ -2505,7 +2945,6 @@ unsafe fn draw_bottom_status_bar(
     let w_left: Vec<u16> = status_info.encode_utf16().collect();
     TextOutW(hdc, 10, top_y + 6, w_left.as_ptr(), w_left.len() as i32);
 
-    // 2. 중앙: 페이지 이동 컨트롤 [⏮] [◀]  1 / 10 (이동)  [▶] [⏭]
     let center_x = client_w / 2;
     let nav_bg = RECT {
         left: center_x - 135,
@@ -2536,7 +2975,6 @@ unsafe fn draw_bottom_status_bar(
         w_nav.len() as i32,
     );
 
-    // 3. 우측: 보기 방식 | 배율 조절 | 전체화면
     let right_bg = RECT {
         left: client_w - 295,
         top: top_y + 3,
@@ -2564,372 +3002,6 @@ unsafe fn draw_bottom_status_bar(
     );
 
     SelectObject(hdc, old_font);
-}
-
-unsafe fn build_main_menu_bar() -> *mut c_void {
-    let hmenu = CreateMenu();
-
-    let add_item = |menu: *mut c_void, id: u16, label: &str| {
-        let w = to_wstring(label);
-        AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
-    };
-    let add_sep = |menu: *mut c_void| {
-        AppendMenuW(menu, MF_SEPARATOR, 0, null());
-    };
-    let add_sub = |parent: *mut c_void, sub: *mut c_void, label: &str| {
-        let w = to_wstring(label);
-        AppendMenuW(parent, MF_POPUP, sub as usize, w.as_ptr());
-    };
-
-    // 1. [파일]
-    let m_file = CreatePopupMenu();
-    add_item(m_file, IDM_FILE_NEW_BLANK, "빈 PDF 생성(&N)");
-    add_item(m_file, IDM_FILE_FROM_CLIPBOARD, "클립보드에서 PDF 생성(&B)");
-    add_sep(m_file);
-    add_item(m_file, IDM_FILE_OPEN, "PDF 파일 열기(&O)...\tO");
-    add_item(m_file, IDM_FILE_SAVE, "저장(&S)\tCtrl+S");
-    add_item(m_file, IDM_FILE_SAVE_AS, "다른 이름으로 저장(&A)...");
-    add_item(m_file, IDM_FILE_SAVE_V14, "다른 버전으로 저장 (PDF 1.4)...");
-    add_item(m_file, IDM_FILE_SAVE_V17, "다른 버전으로 저장 (PDF 1.7)...");
-    add_sep(m_file);
-    add_item(m_file, IDM_FILE_PRINT, "인쇄하기(&P)...\tCtrl+P");
-    add_item(m_file, IDM_FILE_PROPS, "파일 속성(&I)...\tI");
-    add_sep(m_file);
-    add_item(m_file, IDM_FILE_EXIT, "종료(&X)\tESC");
-    add_sub(hmenu, m_file, "파일(&F)");
-
-    // 2. [편집]
-    let m_edit = CreatePopupMenu();
-    add_item(m_edit, IDM_EDIT_ADD_TEXT, "텍스트 추가(&T)...");
-    add_sep(m_edit);
-    add_item(m_edit, IDM_EDIT_WM_CONFIDENTIAL, "워터마크 추가: '기밀 (CONFIDENTIAL)'");
-    add_item(m_edit, IDM_EDIT_WM_SAMPLE, "워터마크 추가: 'SAMPLE'");
-    add_item(m_edit, IDM_EDIT_WM_CUSTOM, "사용자 지정 워터마크 입력...");
-    add_item(m_edit, IDM_EDIT_WM_CLEAR, "워터마크 제거");
-    add_sep(m_edit);
-    add_item(m_edit, IDM_EDIT_BG_CREAM, "배경화면 추가: 눈 보호 크림색");
-    add_item(m_edit, IDM_EDIT_BG_MINT, "배경화면 추가: 소프트 민트색");
-    add_item(m_edit, IDM_EDIT_BG_CLEAR, "배경화면 제거");
-    add_sep(m_edit);
-    add_item(m_edit, IDM_EDIT_HEADER_FOOTER, "머리글 & 바닥글 토글");
-    add_item(m_edit, IDM_EDIT_PAGE_NUMBER, "페이지 번호 표시 토글");
-    add_item(m_edit, IDM_EDIT_BATES_NUMBER, "베이츠 번호(Bates #0001) 표시 토글");
-    add_sub(hmenu, m_edit, "편집(&E)");
-
-    // 3. [주석]
-    let m_annot = CreatePopupMenu();
-    add_item(m_annot, IDM_ANNOT_NONE, "기본 손 도구 (화면 이동 Pan 모드)");
-    add_sep(m_annot);
-    add_item(m_annot, IDM_ANNOT_HIGHLIGHT, "강조 (형광펜 드래그)");
-    add_item(m_annot, IDM_ANNOT_AREA_HL, "영역 강조 (사각 영역 하이라이트)");
-    add_item(m_annot, IDM_ANNOT_UNDERLINE, "밑줄 표시 (드래그)\tCtrl+U");
-    add_item(m_annot, IDM_ANNOT_STRIKEOUT, "취소선 표시 (드래그)\tCtrl+Q");
-    add_sep(m_annot);
-    add_item(m_annot, IDM_ANNOT_PENCIL, "연필 (자유 곡선 그리기)");
-    add_item(m_annot, IDM_ANNOT_ERASER, "지우개 (클릭하여 주석 삭제)");
-    add_item(m_annot, IDM_ANNOT_RECT, "도형: 직사각형 추가");
-    add_item(m_annot, IDM_ANNOT_LINE, "도형: 직선/화살표 추가");
-    add_item(m_annot, IDM_ANNOT_NOTE, "노트/타자기 주석 클릭 추가");
-    add_sep(m_annot);
-    add_item(m_annot, IDM_ANNOT_STAMP_APPROVED, "스탬프 찍기: [승인됨 / APPROVED]");
-    add_item(m_annot, IDM_ANNOT_STAMP_DRAFT, "스탬프 찍기: [초안 / DRAFT]");
-    add_sep(m_annot);
-    add_item(m_annot, IDM_ANNOT_MEASURE_DIST, "측정 도구: 두 점 거리 측정 (cm/mm)");
-    add_item(m_annot, IDM_ANNOT_MEASURE_AREA, "측정 도구: 영역 넓이/둘레 측정 (sq cm)");
-    add_sep(m_annot);
-    add_item(m_annot, IDM_ANNOT_TOGGLE_SHOW, "주석 표시 / 숨기기 토글");
-    add_item(m_annot, IDM_ANNOT_CLEAR_ALL, "모든 사용자 주석 초기화");
-    add_sub(hmenu, m_annot, "주석(&A)");
-
-    // 4. [변환]
-    let m_conv = CreatePopupMenu();
-    add_item(m_conv, IDM_CONV_TO_BMP, "이미지로 변환 (.bmp)...\tS");
-    add_item(m_conv, IDM_CONV_TO_TXT, "텍스트로 변환 (.txt)...");
-    add_item(m_conv, IDM_CONV_TO_HTML, "HTML 웹 문서로 변환 (.html)...");
-    add_item(m_conv, IDM_CONV_TO_RTF, "Word 호환 문서로 변환 (.rtf)...");
-    add_item(m_conv, IDM_CONV_TO_CSV, "Excel 호환 데이터로 변환 (.csv)...");
-    add_sep(m_conv);
-    add_item(m_conv, IDM_CONV_BATCH_TXT, "현재 페이지 텍스트 클립보드 복사\tC");
-    add_sub(hmenu, m_conv, "변환(&C)");
-
-    // 5. [보기]
-    let m_view = CreatePopupMenu();
-    add_item(m_view, IDM_VIEW_ZOOM_IN, "확대(&I)\t+");
-    add_item(m_view, IDM_VIEW_ZOOM_OUT, "축소(&O)\t-");
-    add_item(m_view, IDM_VIEW_ACTUAL_SIZE, "실제 크기 (100%)");
-    add_item(m_view, IDM_VIEW_FIT_PAGE, "창 맞추기 (초기화)\t0");
-    add_item(m_view, IDM_VIEW_FIT_WIDTH, "너비 맞추기 (Fit-to-Width)\tW");
-    add_sep(m_view);
-    add_item(m_view, IDM_VIEW_SINGLE, "단일 페이지 보기 (1p)");
-    add_item(m_view, IDM_VIEW_SPREAD, "두 페이지 양면 보기 (2p)\tD");
-    add_item(m_view, IDM_VIEW_COVER_SPREAD, "별도 표지 양면 보기 토글");
-    add_sep(m_view);
-    add_item(m_view, IDM_VIEW_ROTATE_CW, "시계 방향 회전 (90°)\tR");
-    add_item(m_view, IDM_VIEW_ROTATE_CCW, "반시계 방향 회전 (90°)\tShift+R");
-    add_sep(m_view);
-    add_item(m_view, IDM_VIEW_RULER, "눈금자(Ruler) 표시 토글");
-    add_item(m_view, IDM_VIEW_GRID, "격자(Grid) 및 안내선 표시 토글");
-    add_sep(m_view);
-    add_item(m_view, IDM_VIEW_BOOKMARKS, "좌측 북마크(목차) 패널 토글\tB");
-    add_item(m_view, IDM_VIEW_AUTO_BOOKMARK, "자동 북마크(목차) 생성");
-    add_item(m_view, IDM_VIEW_FULLSCREEN, "읽기 모드 / 전체 화면\tF11");
-    add_sub(hmenu, m_view, "보기(&V)");
-
-    // 6. [구성 (페이지)]
-    let m_org = CreatePopupMenu();
-    add_item(m_org, IDM_ORG_INSERT_BLANK, "빈 페이지 삽입(&B)");
-    add_item(m_org, IDM_ORG_INSERT_PDF, "다른 PDF에서 페이지 삽입(&I)...");
-    add_item(m_org, IDM_ORG_DELETE_PAGE, "현재 페이지 삭제(&D)");
-    add_sep(m_org);
-    add_item(m_org, IDM_ORG_EXTRACT_PAGE, "현재 페이지 추출하여 새 PDF 저장(&E)...");
-    add_item(m_org, IDM_ORG_SPLIT_PDF, "현재 페이지 기준으로 분할 저장(&S)...");
-    add_sep(m_org);
-    add_item(m_org, IDM_ORG_CROP_MARGIN, "페이지 여백 자르기 (CropBox 8%)");
-    add_item(m_org, IDM_ORG_ROTATE_PAGE_OBJ, "현재 페이지 자체 회전 (영구 반영)");
-    add_sub(hmenu, m_org, "구성(&P)");
-
-    // 7. [도구]
-    let m_tool = CreatePopupMenu();
-    add_item(m_tool, IDM_TOOL_SEARCH, "문서 전체 키워드 검색(&F)...\tF");
-    add_item(m_tool, IDM_TOOL_GOTO, "페이지 번호 직접 이동(&G)...\tG");
-    add_sep(m_tool);
-    add_item(m_tool, IDM_TOOL_MERGE_PDF, "PDF 병합 (문서 끝에 다른 PDF 합치기)...");
-    add_item(m_tool, IDM_TOOL_COMPARE_PDF, "PDF 비교 (다른 PDF와 차이점 분석)...");
-    add_item(m_tool, IDM_TOOL_FLATTEN, "평면화 (주석/교정을 본문에 영구 병합)");
-    add_sep(m_tool);
-    add_item(m_tool, IDM_TOOL_DETECT_TABLES, "표 인식 (테이블 감지 및 CSV 복사)");
-    add_item(m_tool, IDM_TOOL_OCR_EXTRACT, "페이지 텍스트 전체 추출/검토");
-    add_item(m_tool, IDM_TOOL_SCREENSHOT, "현재 화면 스크린샷 클립보드 복사");
-    add_sub(hmenu, m_tool, "도구(&T)");
-
-    // 8. [양식]
-    let m_form = CreatePopupMenu();
-    add_item(m_form, IDM_FORM_ADD_TEXTFIELD, "텍스트 필드 양식 추가 (드래그)");
-    add_item(m_form, IDM_FORM_ADD_CHECKBOX, "체크 박스 양식 추가 (클릭)");
-    add_sep(m_form);
-    add_item(m_form, IDM_FORM_RECOGNIZE, "문서 내 양식 필드 자동 인식");
-    add_item(m_form, IDM_FORM_EXPORT_CSV, "양식 데이터 추출 (.csv 저장)...");
-    add_sub(hmenu, m_form, "양식(&M)");
-
-    // 9. [보안]
-    let m_sec = CreatePopupMenu();
-    add_item(m_sec, IDM_SEC_REDACT_TOOL, "교정 표시 도구 (드래그 영역 검은색 마스킹)");
-    add_item(m_sec, IDM_SEC_SEARCH_REDACT, "검색 & 교정 (검색어 일괄 검은색 마스킹)...");
-    add_item(m_sec, IDM_SEC_SANITIZE, "숨겨진 데이터 및 주석 일괄 삭제");
-    add_item(m_sec, IDM_SEC_SIGN_STAMP, "디지털 서명 스탬프 삽입");
-    add_sub(hmenu, m_sec, "보안(&S)");
-
-    // 10. [기타 / 테마]
-    let m_etc = CreatePopupMenu();
-    add_item(m_etc, IDM_THEME_DARK_DOC, "야간 독서용 다크 모드(색상 반전) 토글\tV");
-    add_sep(m_etc);
-    add_item(m_etc, IDM_THEME_LIGHT, "테마 색상: 라이트 모드");
-    add_item(m_etc, IDM_THEME_DARK_BG, "테마 색상: 다크 모드 (기본)");
-    add_item(m_etc, IDM_THEME_CLASSIC, "테마 색상: 클래식 모드");
-    add_sep(m_etc);
-    add_item(m_etc, IDM_HELP_SHORTCUTS, "전체 기능 및 단축키 도움말(&H)\tH / F1");
-    add_sub(hmenu, m_etc, "기타(&O)");
-
-    hmenu
-}
-
-fn to_wstring(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn format_pdf_date(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return String::from("-");
-    }
-    let s = trimmed.strip_prefix("D:").unwrap_or(trimmed);
-    if s.len() >= 14 && s.as_bytes()[..14].iter().all(|b| b.is_ascii_digit()) {
-        format!(
-            "{}-{}-{} {}:{}:{}",
-            &s[0..4],
-            &s[4..6],
-            &s[6..8],
-            &s[8..10],
-            &s[10..12],
-            &s[12..14]
-        )
-    } else if s.len() >= 8 && s.as_bytes()[..8].iter().all(|b| b.is_ascii_digit()) {
-        format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8])
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn write_bgra_to_bmp_file(
-    path: &str,
-    width: i32,
-    height: i32,
-    pixels: &[u8],
-) -> std::io::Result<()> {
-    let mut file = File::create(path)?;
-    let data_size = (width as usize) * (height as usize) * 4;
-    let file_size = 54 + data_size as u32;
-
-    let mut header = [0u8; 54];
-    header[0] = b'B';
-    header[1] = b'M';
-    header[2..6].copy_from_slice(&file_size.to_le_bytes());
-    header[10..14].copy_from_slice(&54u32.to_le_bytes());
-
-    header[14..18].copy_from_slice(&40u32.to_le_bytes());
-    header[18..22].copy_from_slice(&width.to_le_bytes());
-    header[22..26].copy_from_slice(&(-height).to_le_bytes());
-    header[26..28].copy_from_slice(&1u16.to_le_bytes());
-    header[28..30].copy_from_slice(&32u16.to_le_bytes());
-    header[30..34].copy_from_slice(&0u32.to_le_bytes());
-    header[34..38].copy_from_slice(&(data_size as u32).to_le_bytes());
-
-    file.write_all(&header)?;
-    file.write_all(&pixels[..data_size])?;
-    Ok(())
-}
-
-fn save_custom_dialog(
-    hwnd: HWND,
-    default_name: &str,
-    filter_str: &str,
-    def_ext_str: &str,
-) -> Option<String> {
-    unsafe {
-        let mut file_buf = vec![0u16; 1024];
-        for (i, ch) in default_name.encode_utf16().enumerate().take(1000) {
-            file_buf[i] = ch;
-        }
-
-        let filter: Vec<u16> = filter_str.encode_utf16().collect();
-        let def_ext = to_wstring(def_ext_str);
-
-        let mut ofn: OPENFILENAMEW = zeroed();
-        ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
-        ofn.hwndOwner = hwnd;
-        ofn.lpstrFilter = filter.as_ptr();
-        ofn.lpstrFile = file_buf.as_mut_ptr();
-        ofn.nMaxFile = file_buf.len() as u32;
-        ofn.lpstrDefExt = def_ext.as_ptr();
-        ofn.Flags = OFN_EXPLORER
-            | OFN_ENABLESIZING
-            | OFN_OVERWRITEPROMPT
-            | OFN_PATHMUSTEXIST
-            | OFN_NOCHANGEDIR;
-
-        if GetSaveFileNameW(&mut ofn) != 0 {
-            let len = file_buf
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(file_buf.len());
-            Some(String::from_utf16_lossy(&file_buf[..len]))
-        } else {
-            None
-        }
-    }
-}
-
-fn get_clipboard_unicode_text(hwnd: HWND) -> Option<String> {
-    unsafe {
-        if OpenClipboard(hwnd) == 0 {
-            return None;
-        }
-        let hmem = GetClipboardData(CF_UNICODETEXT);
-        if hmem.is_null() {
-            CloseClipboard();
-            return None;
-        }
-        let ptr = GlobalLock(hmem) as *const u16;
-        if ptr.is_null() {
-            CloseClipboard();
-            return None;
-        }
-        let len = (0..100_000).take_while(|&i| *ptr.add(i) != 0).count();
-        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-        GlobalUnlock(hmem);
-        CloseClipboard();
-        Some(text)
-    }
-}
-
-fn set_clipboard_unicode_text(hwnd: HWND, text: &str) -> bool {
-    let wide = to_wstring(text);
-    let byte_len = wide.len() * size_of::<u16>();
-
-    unsafe {
-        if OpenClipboard(hwnd) == 0 {
-            return false;
-        }
-        EmptyClipboard();
-
-        let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_len);
-        if hmem.is_null() {
-            CloseClipboard();
-            return false;
-        }
-
-        let locked_ptr = GlobalLock(hmem) as *mut u16;
-        if locked_ptr.is_null() {
-            CloseClipboard();
-            return false;
-        }
-
-        copy_nonoverlapping(wide.as_ptr(), locked_ptr, wide.len());
-        GlobalUnlock(hmem);
-
-        let result = SetClipboardData(CF_UNICODETEXT, hmem);
-        CloseClipboard();
-
-        !result.is_null()
-    }
-}
-
-unsafe fn copy_current_view_bitmap_to_clipboard(hwnd: HWND, state: &AppState) -> bool {
-    if state.pixels.is_empty() || state.bmp_width <= 0 || state.bmp_height <= 0 {
-        return false;
-    }
-    let hdc_screen = GetDC(hwnd);
-    let hdc_mem = CreateCompatibleDC(hdc_screen);
-    let hbm = CreateCompatibleBitmap(hdc_screen, state.bmp_width, state.bmp_height);
-    let old_bm = SelectObject(hdc_mem, hbm as _);
-
-    let mut bmi: BITMAPINFO = zeroed();
-    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-    bmi.bmiHeader.biWidth = state.bmp_width;
-    bmi.bmiHeader.biHeight = -state.bmp_height;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    StretchDIBits(
-        hdc_mem,
-        0,
-        0,
-        state.bmp_width,
-        state.bmp_height,
-        0,
-        0,
-        state.bmp_width,
-        state.bmp_height,
-        state.pixels.as_ptr() as *const c_void,
-        &bmi,
-        DIB_RGB_COLORS,
-        SRCCOPY,
-    );
-
-    SelectObject(hdc_mem, old_bm);
-    DeleteDC(hdc_mem);
-    ReleaseDC(hwnd, hdc_screen);
-
-    if OpenClipboard(hwnd) != 0 {
-        EmptyClipboard();
-        SetClipboardData(CF_BITMAP, hbm as _);
-        CloseClipboard();
-        true
-    } else {
-        DeleteObject(hbm as _);
-        false
-    }
 }
 
 unsafe fn draw_page_overlays_and_guides(
@@ -3221,147 +3293,172 @@ unsafe fn draw_page_overlays_and_guides(
     SelectObject(hdc, old_font);
 }
 
-unsafe fn draw_bookmark_sidebar(hdc: *mut c_void, client_h: i32, state: &mut AppState) {
-    let top_off = state.top_bar_offset();
-    let bot_off = state.bottom_bar_offset();
-    let panel_bottom = client_h - bot_off;
+unsafe fn build_main_menu_bar() -> *mut c_void {
+    let hmenu = CreateMenu();
 
-    let panel_rc = RECT {
-        left: 0,
-        top: top_off,
-        right: SIDEBAR_WIDTH,
-        bottom: panel_bottom,
+    let add_item = |menu: *mut c_void, id: u16, label: &str| {
+        let w = to_wstring(label);
+        AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
     };
-    let panel_brush = CreateSolidBrush(0x00252526);
-    FillRect(hdc, &panel_rc, panel_brush);
-    DeleteObject(panel_brush as _);
-
-    let header_rc = RECT {
-        left: 0,
-        top: top_off,
-        right: SIDEBAR_WIDTH,
-        bottom: top_off + 32,
+    let add_sep = |menu: *mut c_void| {
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
     };
-    let header_brush = CreateSolidBrush(0x001E1E1E);
-    FillRect(hdc, &header_rc, header_brush);
-    DeleteObject(header_brush as _);
-
-    let border_rc = RECT {
-        left: SIDEBAR_WIDTH - 1,
-        top: top_off,
-        right: SIDEBAR_WIDTH,
-        bottom: panel_bottom,
+    let add_sub = |parent: *mut c_void, sub: *mut c_void, label: &str| {
+        let w = to_wstring(label);
+        AppendMenuW(parent, MF_POPUP, sub as usize, w.as_ptr());
     };
-    let border_brush = CreateSolidBrush(0x00454545);
-    FillRect(hdc, &border_rc, border_brush);
-    DeleteObject(border_brush as _);
 
-    let font = GetStockObject(DEFAULT_GUI_FONT);
-    let old_font = SelectObject(hdc, font);
-    SetBkMode(hdc, TRANSPARENT as i32);
+    // 1. [파일]
+    let m_file = CreatePopupMenu();
+    add_item(m_file, IDM_FILE_NEW_BLANK, "빈 PDF 생성(&N)");
+    add_item(m_file, IDM_FILE_FROM_CLIPBOARD, "클립보드에서 PDF 생성(&B)");
+    add_sep(m_file);
+    add_item(m_file, IDM_FILE_OPEN, "PDF 파일 열기(&O)...\tO");
+    add_item(m_file, IDM_FILE_SAVE, "저장(&S)\tCtrl+S");
+    add_item(m_file, IDM_FILE_SAVE_AS, "다른 이름으로 저장(&A)...");
+    add_item(m_file, IDM_FILE_SAVE_V14, "다른 버전으로 저장 (PDF 1.4)...");
+    add_item(m_file, IDM_FILE_SAVE_V17, "다른 버전으로 저장 (PDF 1.7)...");
+    add_sep(m_file);
+    add_item(m_file, IDM_FILE_PRINT, "인쇄하기(&P)...\tCtrl+P");
+    add_item(m_file, IDM_FILE_PROPS, "파일 속성(&I)...\tI");
+    add_sep(m_file);
+    add_item(m_file, IDM_FILE_EXIT, "종료(&X)\tESC");
+    add_sub(hmenu, m_file, "파일(&F)");
 
-    let avail_h = (panel_bottom - top_off - 36).max(26);
-    let max_rows = (avail_h / BOOKMARK_ROW_HEIGHT).max(1) as usize;
-    let total_bm = state.bookmarks.len();
-    let max_scroll = total_bm.saturating_sub(max_rows);
-    if state.bookmark_scroll > max_scroll {
-        state.bookmark_scroll = max_scroll;
-    }
+    // 2. [편집]
+    let m_edit = CreatePopupMenu();
+    add_item(m_edit, IDM_EDIT_ADD_TEXT, "텍스트 추가(&T)...");
+    add_sep(m_edit);
+    add_item(m_edit, IDM_EDIT_WM_CONFIDENTIAL, "워터마크 추가: '기밀 (CONFIDENTIAL)'");
+    add_item(m_edit, IDM_EDIT_WM_SAMPLE, "워터마크 추가: 'SAMPLE'");
+    add_item(m_edit, IDM_EDIT_WM_CUSTOM, "사용자 지정 워터마크 입력...");
+    add_item(m_edit, IDM_EDIT_WM_CLEAR, "워터마크 제거");
+    add_sep(m_edit);
+    add_item(m_edit, IDM_EDIT_BG_CREAM, "배경화면 추가: 눈 보호 크림색");
+    add_item(m_edit, IDM_EDIT_BG_MINT, "배경화면 추가: 소프트 민트색");
+    add_item(m_edit, IDM_EDIT_BG_CLEAR, "배경화면 제거");
+    add_sep(m_edit);
+    add_item(m_edit, IDM_EDIT_HEADER_FOOTER, "머리글 & 바닥글 토글");
+    add_item(m_edit, IDM_EDIT_PAGE_NUMBER, "페이지 번호 표시 토글");
+    add_item(m_edit, IDM_EDIT_BATES_NUMBER, "베이츠 번호(Bates #0001) 표시 토글");
+    add_sub(hmenu, m_edit, "편집(&E)");
 
-    SetTextColor(hdc, 0x0080D8FF);
-    let header_title = if total_bm > max_rows {
-        format!(
-            "목차 ({}-{}/{}) [휠:스크롤]",
-            state.bookmark_scroll + 1,
-            (state.bookmark_scroll + max_rows).min(total_bm),
-            total_bm
-        )
-    } else {
-        format!("목차 (Bookmarks: {}) [B:닫기]", total_bm)
-    };
-    let w_header: Vec<u16> = header_title.encode_utf16().collect();
-    TextOutW(
-        hdc,
-        10,
-        top_off + 8,
-        w_header.as_ptr(),
-        w_header.len() as i32,
-    );
+    // 3. [주석]
+    let m_annot = CreatePopupMenu();
+    add_item(m_annot, IDM_ANNOT_NONE, "기본 손 도구 (화면 이동 Pan 모드)");
+    add_sep(m_annot);
+    add_item(m_annot, IDM_ANNOT_HIGHLIGHT, "강조 (형광펜 드래그)");
+    add_item(m_annot, IDM_ANNOT_AREA_HL, "영역 강조 (사각 영역 하이라이트)");
+    add_item(m_annot, IDM_ANNOT_UNDERLINE, "밑줄 표시 (드래그)\tCtrl+U");
+    add_item(m_annot, IDM_ANNOT_STRIKEOUT, "취소선 표시 (드래그)\tCtrl+Q");
+    add_sep(m_annot);
+    add_item(m_annot, IDM_ANNOT_PENCIL, "연필 (자유 곡선 그리기)");
+    add_item(m_annot, IDM_ANNOT_ERASER, "지우개 (클릭하여 주석 삭제)");
+    add_item(m_annot, IDM_ANNOT_RECT, "도형: 직사각형 추가");
+    add_item(m_annot, IDM_ANNOT_LINE, "도형: 직선/화살표 추가");
+    add_item(m_annot, IDM_ANNOT_NOTE, "노트/타자기 주석 클릭 추가");
+    add_sep(m_annot);
+    add_item(m_annot, IDM_ANNOT_STAMP_APPROVED, "스탬프 찍기: [승인됨 / APPROVED]");
+    add_item(m_annot, IDM_ANNOT_STAMP_DRAFT, "스탬프 찍기: [초안 / DRAFT]");
+    add_sep(m_annot);
+    add_item(m_annot, IDM_ANNOT_MEASURE_DIST, "측정 도구: 두 점 거리 측정 (cm/mm)");
+    add_item(m_annot, IDM_ANNOT_MEASURE_AREA, "측정 도구: 영역 넓이/둘레 측정 (sq cm)");
+    add_sep(m_annot);
+    add_item(m_annot, IDM_ANNOT_TOGGLE_SHOW, "주석 표시 / 숨기기 토글");
+    add_item(m_annot, IDM_ANNOT_CLEAR_ALL, "모든 사용자 주석 초기화");
+    add_sub(hmenu, m_annot, "주석(&A)");
 
-    if state.bookmarks.is_empty() {
-        SetTextColor(hdc, 0x00AAAAAA);
-        let empty_msg: Vec<u16> = "목차 없음 ([보기 > 자동 북마크] 가능)".encode_utf16().collect();
-        TextOutW(
-            hdc,
-            12,
-            top_off + 46,
-            empty_msg.as_ptr(),
-            empty_msg.len() as i32,
-        );
-    } else {
-        for (i, bm) in state
-            .bookmarks
-            .iter()
-            .enumerate()
-            .skip(state.bookmark_scroll)
-            .take(max_rows)
-        {
-            let row_idx = i - state.bookmark_scroll;
-            let y_top = top_off + 34 + (row_idx as i32) * BOOKMARK_ROW_HEIGHT;
-            let is_current = bm.page_index == state.current_page
-                || (state.spread_mode && bm.page_index == state.current_page + 1);
+    // 4. [변환]
+    let m_conv = CreatePopupMenu();
+    add_item(m_conv, IDM_CONV_TO_BMP, "이미지로 변환 (.bmp)...\tS");
+    add_item(m_conv, IDM_CONV_TO_TXT, "텍스트로 변환 (.txt)...");
+    add_item(m_conv, IDM_CONV_TO_HTML, "HTML 웹 문서로 변환 (.html)...");
+    add_item(m_conv, IDM_CONV_TO_RTF, "Word 호환 문서로 변환 (.rtf)...");
+    add_item(m_conv, IDM_CONV_TO_CSV, "Excel 호환 데이터로 변환 (.csv)...");
+    add_sep(m_conv);
+    add_item(m_conv, IDM_CONV_BATCH_TXT, "현재 페이지 텍스트 클립보드 복사\tC");
+    add_sub(hmenu, m_conv, "변환(&C)");
 
-            if is_current {
-                let active_rc = RECT {
-                    left: 2,
-                    top: y_top,
-                    right: SIDEBAR_WIDTH - 6,
-                    bottom: y_top + BOOKMARK_ROW_HEIGHT - 1,
-                };
-                let active_brush = CreateSolidBrush(0x005A3D1C);
-                FillRect(hdc, &active_rc, active_brush);
-                DeleteObject(active_brush as _);
-                SetTextColor(hdc, 0x0000EAFF);
-            } else {
-                SetTextColor(hdc, 0x00E6E6E6);
-            }
+    // 5. [보기]
+    let m_view = CreatePopupMenu();
+    add_item(m_view, IDM_VIEW_ZOOM_IN, "확대(&I)\t+");
+    add_item(m_view, IDM_VIEW_ZOOM_OUT, "축소(&O)\t-");
+    add_item(m_view, IDM_VIEW_ACTUAL_SIZE, "실제 크기 (100%)");
+    add_item(m_view, IDM_VIEW_FIT_PAGE, "창 맞추기 (초기화)\t0");
+    add_item(m_view, IDM_VIEW_FIT_WIDTH, "너비 맞추기 (Fit-to-Width)\tW");
+    add_sep(m_view);
+    add_item(m_view, IDM_VIEW_SINGLE, "단일 페이지 보기 (1p)");
+    add_item(m_view, IDM_VIEW_SPREAD, "두 페이지 양면 보기 (2p)\tD");
+    add_item(m_view, IDM_VIEW_COVER_SPREAD, "별도 표지 양면 보기 토글");
+    add_sep(m_view);
+    add_item(m_view, IDM_VIEW_ROTATE_CW, "시계 방향 회전 (90°)\tR");
+    add_item(m_view, IDM_VIEW_ROTATE_CCW, "반시계 방향 회전 (90°)\tShift+R");
+    add_sep(m_view);
+    add_item(m_view, IDM_VIEW_RULER, "눈금자(Ruler) 표시 토글");
+    add_item(m_view, IDM_VIEW_GRID, "격자(Grid) 및 안내선 표시 토글");
+    add_sep(m_view);
+    add_item(m_view, IDM_VIEW_BOOKMARKS, "좌측 패널: 목차(Bookmarks) 탭 보기\tB");
+    add_item(m_view, IDM_VIEW_THUMBNAILS, "좌측 패널: 페이지 썸네일 미리보기 탭");
+    add_item(m_view, IDM_VIEW_AUTO_BOOKMARK, "자동 북마크(목차) 생성");
+    add_item(m_view, IDM_VIEW_FULLSCREEN, "읽기 모드 / 전체 화면\tF11");
+    add_sub(hmenu, m_view, "보기(&V)");
 
-            let indent = (bm.depth.min(5) as i32) * 12;
-            let label = if bm.page_index >= 0 {
-                format!("[p.{}] {}", bm.page_index + 1, bm.title)
-            } else {
-                bm.title.clone()
-            };
-            let w_label: Vec<u16> = label.encode_utf16().collect();
-            TextOutW(
-                hdc,
-                10 + indent,
-                y_top + 5,
-                w_label.as_ptr(),
-                w_label.len() as i32,
-            );
-        }
+    // 6. [구성 (페이지)]
+    let m_org = CreatePopupMenu();
+    add_item(m_org, IDM_ORG_INSERT_BLANK, "빈 페이지 삽입(&B)");
+    add_item(m_org, IDM_ORG_INSERT_PDF, "다른 PDF에서 페이지 삽입(&I)...");
+    add_item(m_org, IDM_ORG_DELETE_PAGE, "현재 페이지 삭제(&D)");
+    add_sep(m_org);
+    add_item(m_org, IDM_ORG_EXTRACT_PAGE, "현재 페이지 추출하여 새 PDF 저장(&E)...");
+    add_item(m_org, IDM_ORG_SPLIT_PDF, "현재 페이지 기준으로 분할 저장(&S)...");
+    add_sep(m_org);
+    add_item(m_org, IDM_ORG_CROP_MARGIN, "페이지 여백 자르기 (CropBox 8%)");
+    add_item(m_org, IDM_ORG_ROTATE_PAGE_OBJ, "현재 페이지 자체 회전 (영구 반영)");
+    add_sub(hmenu, m_org, "구성(&P)");
 
-        if total_bm > max_rows && avail_h > 40 {
-            let track_top = top_off + 34;
-            let track_h = panel_bottom - track_top - 4;
-            let thumb_h = ((max_rows as f64 / total_bm as f64) * track_h as f64).max(24.0) as i32;
-            let scroll_ratio = state.bookmark_scroll as f64 / max_scroll.max(1) as f64;
-            let thumb_top = track_top + ((track_h - thumb_h) as f64 * scroll_ratio) as i32;
+    // 7. [도구]
+    let m_tool = CreatePopupMenu();
+    add_item(m_tool, IDM_TOOL_SEARCH, "문서 전체 키워드 검색(&F)...\tF");
+    add_item(m_tool, IDM_TOOL_GOTO, "페이지 번호 직접 이동(&G)...\tG");
+    add_sep(m_tool);
+    add_item(m_tool, IDM_TOOL_MERGE_PDF, "PDF 병합 (문서 끝에 다른 PDF 합치기)...");
+    add_item(m_tool, IDM_TOOL_COMPARE_PDF, "PDF 비교 (다른 PDF와 차이점 분석)...");
+    add_item(m_tool, IDM_TOOL_FLATTEN, "평면화 (주석/교정을 본문에 영구 병합)");
+    add_sep(m_tool);
+    add_item(m_tool, IDM_TOOL_DETECT_TABLES, "표 인식 (테이블 감지 및 CSV 복사)");
+    add_item(m_tool, IDM_TOOL_OCR_EXTRACT, "페이지 텍스트 전체 추출/검토");
+    add_item(m_tool, IDM_TOOL_SCREENSHOT, "현재 화면 스크린샷 클립보드 복사");
+    add_sub(hmenu, m_tool, "도구(&T)");
 
-            let thumb_rc = RECT {
-                left: SIDEBAR_WIDTH - 5,
-                top: thumb_top,
-                right: SIDEBAR_WIDTH - 2,
-                bottom: thumb_top + thumb_h,
-            };
-            let thumb_brush = CreateSolidBrush(0x00888888);
-            FillRect(hdc, &thumb_rc, thumb_brush);
-            DeleteObject(thumb_brush as _);
-        }
-    }
+    // 8. [양식]
+    let m_form = CreatePopupMenu();
+    add_item(m_form, IDM_FORM_ADD_TEXTFIELD, "텍스트 필드 양식 추가 (드래그)");
+    add_item(m_form, IDM_FORM_ADD_CHECKBOX, "체크 박스 양식 추가 (클릭)");
+    add_sep(m_form);
+    add_item(m_form, IDM_FORM_RECOGNIZE, "문서 내 양식 필드 자동 인식");
+    add_item(m_form, IDM_FORM_EXPORT_CSV, "양식 데이터 추출 (.csv 저장)...");
+    add_sub(hmenu, m_form, "양식(&M)");
 
-    SelectObject(hdc, old_font);
+    // 9. [보안]
+    let m_sec = CreatePopupMenu();
+    add_item(m_sec, IDM_SEC_REDACT_TOOL, "교정 표시 도구 (드래그 영역 검은색 마스킹)");
+    add_item(m_sec, IDM_SEC_SEARCH_REDACT, "검색 & 교정 (검색어 일괄 검은색 마스킹)...");
+    add_item(m_sec, IDM_SEC_SANITIZE, "숨겨진 데이터 및 주석 일괄 삭제");
+    add_item(m_sec, IDM_SEC_SIGN_STAMP, "디지털 서명 스탬프 삽입");
+    add_sub(hmenu, m_sec, "보안(&S)");
+
+    // 10. [기타 / 테마]
+    let m_etc = CreatePopupMenu();
+    add_item(m_etc, IDM_THEME_DARK_DOC, "야간 독서용 다크 모드(색상 반전) 토글\tV");
+    add_sep(m_etc);
+    add_item(m_etc, IDM_THEME_LIGHT, "테마 색상: 라이트 모드");
+    add_item(m_etc, IDM_THEME_DARK_BG, "테마 색상: 다크 모드 (기본)");
+    add_item(m_etc, IDM_THEME_CLASSIC, "테마 색상: 클래식 모드");
+    add_sep(m_etc);
+    add_item(m_etc, IDM_HELP_SHORTCUTS, "전체 기능 및 단축키 도움말(&H)\tH / F1");
+    add_sub(hmenu, m_etc, "기타(&O)");
+
+    hmenu
 }
 
 fn update_window_title(hwnd: HWND, state: &AppState) {
@@ -3455,6 +3552,205 @@ fn update_window_title(hwnd: HWND, state: &AppState) {
     let w_title = to_wstring(&title);
     unsafe {
         SetWindowTextW(hwnd, w_title.as_ptr());
+    }
+}
+
+fn to_wstring(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn format_pdf_date(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::from("-");
+    }
+    let s = trimmed.strip_prefix("D:").unwrap_or(trimmed);
+    if s.len() >= 14 && s.as_bytes()[..14].iter().all(|b| b.is_ascii_digit()) {
+        format!(
+            "{}-{}-{} {}:{}:{}",
+            &s[0..4],
+            &s[4..6],
+            &s[6..8],
+            &s[8..10],
+            &s[10..12],
+            &s[12..14]
+        )
+    } else if s.len() >= 8 && s.as_bytes()[..8].iter().all(|b| b.is_ascii_digit()) {
+        format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8])
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn write_bgra_to_bmp_file(
+    path: &str,
+    width: i32,
+    height: i32,
+    pixels: &[u8],
+) -> std::io::Result<()> {
+    let mut file = File::create(path)?;
+    let data_size = (width as usize) * (height as usize) * 4;
+    let file_size = 54 + data_size as u32;
+
+    let mut header = [0u8; 54];
+    header[0] = b'B';
+    header[1] = b'M';
+    header[2..6].copy_from_slice(&file_size.to_le_bytes());
+    header[10..14].copy_from_slice(&54u32.to_le_bytes());
+
+    header[14..18].copy_from_slice(&40u32.to_le_bytes());
+    header[18..22].copy_from_slice(&width.to_le_bytes());
+    header[22..26].copy_from_slice(&(-height).to_le_bytes());
+    header[26..28].copy_from_slice(&1u16.to_le_bytes());
+    header[28..30].copy_from_slice(&32u16.to_le_bytes());
+    header[30..34].copy_from_slice(&0u32.to_le_bytes());
+    header[34..38].copy_from_slice(&(data_size as u32).to_le_bytes());
+
+    file.write_all(&header)?;
+    file.write_all(&pixels[..data_size])?;
+    Ok(())
+}
+
+fn save_custom_dialog(
+    hwnd: HWND,
+    default_name: &str,
+    filter_str: &str,
+    def_ext_str: &str,
+) -> Option<String> {
+    unsafe {
+        let mut file_buf = vec![0u16; 1024];
+        for (i, ch) in default_name.encode_utf16().enumerate().take(1000) {
+            file_buf[i] = ch;
+        }
+
+        let filter: Vec<u16> = filter_str.encode_utf16().collect();
+        let def_ext = to_wstring(def_ext_str);
+
+        let mut ofn: OPENFILENAMEW = zeroed();
+        ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+        ofn.hwndOwner = hwnd;
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = file_buf.as_mut_ptr();
+        ofn.nMaxFile = file_buf.len() as u32;
+        ofn.lpstrDefExt = def_ext.as_ptr();
+        ofn.Flags = OFN_EXPLORER
+            | OFN_ENABLESIZING
+            | OFN_OVERWRITEPROMPT
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR;
+
+        if GetSaveFileNameW(&mut ofn) != 0 {
+            let len = file_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(file_buf.len());
+            Some(String::from_utf16_lossy(&file_buf[..len]))
+        } else {
+            None
+        }
+    }
+}
+
+fn get_clipboard_unicode_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        if OpenClipboard(hwnd) == 0 {
+            return None;
+        }
+        let hmem = GetClipboardData(CF_UNICODETEXT);
+        if hmem.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let ptr = GlobalLock(hmem) as *const u16;
+        if ptr.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let len = (0..100_000).take_while(|&i| *ptr.add(i) != 0).count();
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+        GlobalUnlock(hmem);
+        CloseClipboard();
+        Some(text)
+    }
+}
+
+fn set_clipboard_unicode_text(hwnd: HWND, text: &str) -> bool {
+    let wide = to_wstring(text);
+    let byte_len = wide.len() * size_of::<u16>();
+
+    unsafe {
+        if OpenClipboard(hwnd) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_len);
+        if hmem.is_null() {
+            CloseClipboard();
+            return false;
+        }
+
+        let locked_ptr = GlobalLock(hmem) as *mut u16;
+        if locked_ptr.is_null() {
+            CloseClipboard();
+            return false;
+        }
+
+        copy_nonoverlapping(wide.as_ptr(), locked_ptr, wide.len());
+        GlobalUnlock(hmem);
+
+        let result = SetClipboardData(CF_UNICODETEXT, hmem);
+        CloseClipboard();
+
+        !result.is_null()
+    }
+}
+
+unsafe fn copy_current_view_bitmap_to_clipboard(hwnd: HWND, state: &AppState) -> bool {
+    if state.pixels.is_empty() || state.bmp_width <= 0 || state.bmp_height <= 0 {
+        return false;
+    }
+    let hdc_screen = GetDC(hwnd);
+    let hdc_mem = CreateCompatibleDC(hdc_screen);
+    let hbm = CreateCompatibleBitmap(hdc_screen, state.bmp_width, state.bmp_height);
+    let old_bm = SelectObject(hdc_mem, hbm as _);
+
+    let mut bmi: BITMAPINFO = zeroed();
+    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = state.bmp_width;
+    bmi.bmiHeader.biHeight = -state.bmp_height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    StretchDIBits(
+        hdc_mem,
+        0,
+        0,
+        state.bmp_width,
+        state.bmp_height,
+        0,
+        0,
+        state.bmp_width,
+        state.bmp_height,
+        state.pixels.as_ptr() as *const c_void,
+        &bmi,
+        DIB_RGB_COLORS,
+        SRCCOPY,
+    );
+
+    SelectObject(hdc_mem, old_bm);
+    DeleteDC(hdc_mem);
+    ReleaseDC(hwnd, hdc_screen);
+
+    if OpenClipboard(hwnd) != 0 {
+        EmptyClipboard();
+        SetClipboardData(CF_BITMAP, hbm as _);
+        CloseClipboard();
+        true
+    } else {
+        DeleteObject(hbm as _);
+        false
     }
 }
 
@@ -3557,7 +3853,8 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
             }
             state.input_mode = InputMode::AddTextPrompt;
             state.text_prompt_buf.clear();
-            state.status_msg = Some("상단 타이틀바 안내를 보고 추가할 텍스트를 입력 후 Enter를 누르세요".to_string());
+            state.status_msg =
+                Some("상단 타이틀바 안내를 보고 추가할 텍스트를 입력 후 Enter를 누르세요".to_string());
             state.refresh_view(hwnd, false);
         }
         IDM_EDIT_WM_CONFIDENTIAL => {
@@ -3756,7 +4053,21 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
             state.refresh_view(hwnd, false);
         }
         IDM_VIEW_BOOKMARKS => {
-            state.show_bookmarks = !state.show_bookmarks;
+            if state.show_sidebar && state.sidebar_tab == SidebarTab::Bookmarks {
+                state.show_sidebar = false;
+            } else {
+                state.show_sidebar = true;
+                state.sidebar_tab = SidebarTab::Bookmarks;
+            }
+            state.refresh_view(hwnd, true);
+        }
+        IDM_VIEW_THUMBNAILS => {
+            if state.show_sidebar && state.sidebar_tab == SidebarTab::Thumbnails {
+                state.show_sidebar = false;
+            } else {
+                state.show_sidebar = true;
+                state.sidebar_tab = SidebarTab::Thumbnails;
+            }
             state.refresh_view(hwnd, true);
         }
         IDM_VIEW_AUTO_BOOKMARK => state.generate_auto_bookmarks(hwnd),
@@ -3775,6 +4086,7 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
                     FPDFPage_SetRotation(page, (cur_rot + 1) % 4);
                     FPDFPage_GenerateContent(page);
                     FPDF_ClosePage(page);
+                    state.thumb_cache.remove(&state.current_page);
                     state.refresh_view(hwnd, true);
                 }
             }
@@ -3783,7 +4095,8 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
         IDM_TOOL_SEARCH => {
             if !state.doc.is_null() {
                 state.input_mode = InputMode::Search;
-                state.status_msg = Some("검색할 키워드를 입력해 주세요 (Enter: 확정, ESC: 취소)".to_string());
+                state.status_msg =
+                    Some("검색할 키워드를 입력해 주세요 (Enter: 확정, ESC: 취소)".to_string());
                 state.refresh_view(hwnd, false);
             }
         }
@@ -3977,7 +4290,6 @@ unsafe extern "system" fn wnd_proc(
                 let client_w = rc.right - rc.left;
                 let client_h = rc.bottom - rc.top;
 
-                // 1. 상단 툴바 클릭 확인
                 if !state.is_fullscreen && click_y < TOOLBAR_HEIGHT {
                     if let Some(cmd_id) = hit_test_toolbar(click_x, click_y) {
                         handle_menu_command(hwnd, cmd_id, state);
@@ -3985,7 +4297,6 @@ unsafe extern "system" fn wnd_proc(
                     return 0;
                 }
 
-                // 2. 하단 상태바 클릭 확인
                 if !state.is_fullscreen && click_y >= client_h - STATUSBAR_HEIGHT {
                     if let Some(cmd_id) = hit_test_status_bar(click_x, client_w) {
                         handle_menu_command(hwnd, cmd_id, state);
@@ -3993,16 +4304,45 @@ unsafe extern "system" fn wnd_proc(
                     return 0;
                 }
 
-                // 3. 좌측 북마크 사이드바 클릭 확인
+                // 좌측 사이드바 탭 전환 및 목차/썸네일 항목 클릭 처리
                 let top_off = state.top_bar_offset();
-                if state.show_bookmarks && click_x < SIDEBAR_WIDTH {
-                    if click_y >= top_off + 34 {
-                        let row = ((click_y - top_off - 34) / BOOKMARK_ROW_HEIGHT) as usize;
-                        let bm_idx = state.bookmark_scroll + row;
-                        if let Some(bm) = state.bookmarks.get(bm_idx) {
-                            let target_page = bm.page_index;
-                            if target_page >= 0 {
-                                state.go_to_page(target_page, hwnd);
+                if state.show_sidebar && click_x < SIDEBAR_WIDTH {
+                    // 상단 탭 바 클릭 판별
+                    if click_y >= top_off && click_y < top_off + SIDEBAR_TAB_HEIGHT {
+                        if click_x >= 246 {
+                            state.show_sidebar = false;
+                            state.refresh_view(hwnd, true);
+                        } else if click_x < 123 {
+                            state.sidebar_tab = SidebarTab::Bookmarks;
+                            InvalidateRect(hwnd, null(), 0);
+                        } else {
+                            state.sidebar_tab = SidebarTab::Thumbnails;
+                            InvalidateRect(hwnd, null(), 0);
+                        }
+                        return 0;
+                    }
+
+                    let content_top = top_off + SIDEBAR_TAB_HEIGHT + 4;
+                    if click_y >= content_top {
+                        match state.sidebar_tab {
+                            SidebarTab::Bookmarks => {
+                                let row =
+                                    ((click_y - content_top) / BOOKMARK_ROW_HEIGHT) as usize;
+                                let bm_idx = state.bookmark_scroll + row;
+                                if let Some(bm) = state.bookmarks.get(bm_idx) {
+                                    let target_page = bm.page_index;
+                                    if target_page >= 0 {
+                                        state.go_to_page(target_page, hwnd);
+                                    }
+                                }
+                            }
+                            SidebarTab::Thumbnails => {
+                                let slot =
+                                    ((click_y - content_top) / THUMB_ITEM_HEIGHT) as usize;
+                                let target_page = (state.thumb_scroll + slot) as i32;
+                                if target_page >= 0 && target_page < state.page_count {
+                                    state.go_to_page(target_page, hwnd);
+                                }
                             }
                         }
                     }
@@ -4222,8 +4562,8 @@ unsafe extern "system" fn wnd_proc(
                 };
                 ScreenToClient(hwnd, &mut pt);
 
-                if !ctrl_pressed && state.show_bookmarks && pt.x >= 0 && pt.x < SIDEBAR_WIDTH {
-                    state.scroll_bookmarks(delta, hwnd);
+                if !ctrl_pressed && state.show_sidebar && pt.x >= 0 && pt.x < SIDEBAR_WIDTH {
+                    state.scroll_sidebar(delta, hwnd);
                     return 0;
                 }
 
@@ -4333,6 +4673,7 @@ unsafe extern "system" fn wnd_proc(
                                             FPDFPage_GenerateContent(page);
                                             FPDF_ClosePage(page);
                                         }
+                                        state.thumb_cache.remove(&state.current_page);
                                         state.status_msg =
                                             Some(format!("텍스트 객체 추가됨: {}", txt));
                                     }
@@ -4435,7 +4776,7 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     0x42 => {
-                        state.show_bookmarks = !state.show_bookmarks;
+                        state.show_sidebar = !state.show_sidebar;
                         state.refresh_view(hwnd, true);
                     }
                     VK_OEM_4 => state.step_bookmark(false, hwnd),
@@ -4551,11 +4892,10 @@ unsafe extern "system" fn wnd_proc(
                     );
                 }
 
-                if state.show_bookmarks {
-                    draw_bookmark_sidebar(hdc as *mut c_void, client_h, state);
+                if state.show_sidebar {
+                    draw_left_sidebar_panel(hdc as *mut c_void, client_h, state);
                 }
 
-                // 상단 비주얼 툴바 및 하단 상태 표시줄 렌더링
                 if !state.is_fullscreen {
                     draw_top_toolbar(hdc as *mut c_void, client_w, state);
                     draw_bottom_status_bar(hdc as *mut c_void, client_w, client_h, state);
@@ -4615,7 +4955,7 @@ fn main() {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             60,
             60,
-            1420,
+            1460,
             1060,
             null_mut(),
             hmenu as _,
@@ -4647,5 +4987,3 @@ fn main() {
         FPDF_DestroyLibrary();
     }
 }
-
-
