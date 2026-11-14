@@ -24,9 +24,10 @@ use windows_sys::Win32::{
     },
     UI::{
         Controls::Dialogs::{
-            GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT,
-            OFN_PATHMUSTEXIST, OPENFILENAMEW,
+            GetOpenFileNameW, GetSaveFileNameW, OFN_ENABLESIZING, OFN_EXPLORER, OFN_FILEMUSTEXIST,
+            OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
         },
+        HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
         Input::KeyboardAndMouse::{
             GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE,
             VK_F1, VK_F11, VK_F3, VK_LEFT, VK_NEXT, VK_OEM_4, VK_OEM_6, VK_OEM_MINUS, VK_OEM_PLUS,
@@ -46,6 +47,7 @@ use windows_sys::Win32::{
     },
 };
 
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CF_UNICODETEXT: u32 = 13;
 const SIDEBAR_WIDTH: i32 = 280;
 const BOOKMARK_ROW_HEIGHT: i32 = 26;
@@ -416,7 +418,7 @@ impl AppState {
             );
 
             let w_info = to_wstring(&info_text);
-            let w_caption = to_wstring("DaPDF - 문서 메타데이터 정보");
+            let w_caption = to_wstring(&format!("DaPDF(v{}) - 문서 메타데이터 정보", APP_VERSION));
             MessageBoxW(
                 hwnd,
                 w_info.as_ptr(),
@@ -458,7 +460,10 @@ impl AppState {
 • ESC : 검색/입력 취소 → 전체화면 해제 → 프로그램 종료";
 
         let w_help = to_wstring(help_text);
-        let w_caption = to_wstring("DaPDF Viewer - 단축키 및 조작 도움말 (H / F1)");
+        let w_caption = to_wstring(&format!(
+            "DaPDF(v{}) Viewer - 단축키 및 조작 도움말 (H / F1)",
+            APP_VERSION
+        ));
         unsafe {
             MessageBoxW(
                 hwnd,
@@ -1423,7 +1428,7 @@ fn save_image_dialog(hwnd: HWND, default_name: &str) -> Option<String> {
         ofn.lpstrFile = file_buf.as_mut_ptr();
         ofn.nMaxFile = file_buf.len() as u32;
         ofn.lpstrDefExt = def_ext.as_ptr();
-        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+        ofn.Flags = OFN_EXPLORER | OFN_ENABLESIZING | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
         if GetSaveFileNameW(&mut ofn) != 0 {
             let len = file_buf
@@ -1581,7 +1586,8 @@ fn update_window_title(hwnd: HWND, state: &AppState) {
         let fit_badge = if state.fit_width { " | 폭맞춤" } else { "" };
         let mode_badge = if state.dark_mode { " | 🌙다크" } else { "" };
         let base = format!(
-            "DaPDF - {} ({}) [Zoom: {:.0}%{} | {}°{}]",
+            "DaPDF(v{}) - {} ({}) [Zoom: {:.0}%{} | {}°{}]",
+            APP_VERSION,
             state.file_name,
             page_disp,
             state.zoom * 100.0,
@@ -1641,7 +1647,7 @@ fn update_window_title(hwnd: HWND, state: &AppState) {
             }
         }
     } else {
-        format!("DaPDF - {}", state.file_name)
+        format!("DaPDF(v{}) - {}", APP_VERSION, state.file_name)
     };
 
     let w_title = to_wstring(&title);
@@ -1663,7 +1669,7 @@ fn open_file_dialog(hwnd: HWND) -> Option<String> {
         ofn.lpstrFilter = filter.as_ptr();
         ofn.lpstrFile = file_buf.as_mut_ptr();
         ofn.nMaxFile = file_buf.len() as u32;
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        ofn.Flags = OFN_EXPLORER | OFN_ENABLESIZING | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
         if GetOpenFileNameW(&mut ofn) != 0 {
             let len = file_buf
@@ -2057,16 +2063,18 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn main() {
+    // 고해상도(HiDPI) 모니터 배율 인식 활성화 -> 파일 열기 창 및 폰트 흐림 현상 완벽 해결
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        FPDF_InitLibrary();
+    }
+
     let args: Vec<String> = env::args().collect();
     let initial_pdf = if args.len() > 1 {
         args[1].clone()
     } else {
         "test- .pdf".to_string()
     };
-
-    unsafe {
-        FPDF_InitLibrary();
-    }
 
     let mut app_state = AppState::new();
     if Path::new(&initial_pdf).exists() {
@@ -2089,7 +2097,7 @@ fn main() {
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
-            to_wstring("DaPDF Viewer").as_ptr(),
+            to_wstring(&format!("DaPDF(v{}) Viewer", APP_VERSION)).as_ptr(),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             80,
             80,
