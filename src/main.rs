@@ -46,11 +46,11 @@ use windows_sys::Win32::{
             LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW, SetCursor, SetMenu,
             SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow,
             TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, GWL_STYLE, HWND_TOP,
-            IDC_ARROW, IDC_HAND, MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING,
-            MSG, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_SHOWNORMAL, SW_SHOW,
-            WINDOWPLACEMENT, WM_CHAR, WM_COMMAND, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-            WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            IDC_ARROW, IDC_HAND, IDC_IBEAM, MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR,
+            MF_STRING, MSG, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_SHOWNORMAL,
+            SW_SHOW, WINDOWPLACEMENT, WM_CHAR, WM_COMMAND, WM_DESTROY, WM_DROPFILES,
+            WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+            WM_PAINT, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     },
 };
@@ -66,7 +66,6 @@ const SPREAD_GAP: i32 = 16;
 const TOOLBAR_HEIGHT: i32 = 40;
 const STATUSBAR_HEIGHT: i32 = 28;
 
-// PDFium Action Type 상수 (fpdf_doc.h)
 const PDFACTION_GOTO: c_ulong = 1;
 const PDFACTION_URI: c_ulong = 3;
 
@@ -97,6 +96,7 @@ const IDM_EDIT_PAGE_NUMBER: u16 = 2010;
 const IDM_EDIT_BATES_NUMBER: u16 = 2011;
 
 const IDM_ANNOT_NONE: u16 = 3000;
+const IDM_ANNOT_TEXT_SELECT: u16 = 3016;
 const IDM_ANNOT_HIGHLIGHT: u16 = 3001;
 const IDM_ANNOT_AREA_HL: u16 = 3002;
 const IDM_ANNOT_PENCIL: u16 = 3003;
@@ -277,9 +277,17 @@ extern "C" {
         flags: c_int,
     );
 
+    // 텍스트 좌표 및 선택/추출 API (fpdf_text.h)
     fn FPDFText_LoadPage(page: *mut c_void) -> *mut c_void;
     fn FPDFText_ClosePage(text_page: *mut c_void);
     fn FPDFText_CountChars(text_page: *mut c_void) -> c_int;
+    fn FPDFText_GetCharIndexAtPos(
+        text_page: *mut c_void,
+        x: c_double,
+        y: c_double,
+        x_tolerance: c_double,
+        y_tolerance: c_double,
+    ) -> c_int;
     fn FPDFText_GetText(
         text_page: *mut c_void,
         start_index: c_int,
@@ -308,7 +316,7 @@ extern "C" {
         bottom: *mut c_double,
     ) -> c_int;
 
-    // 북마크, 링크 및 액션 API (fpdf_doc.h)
+    // 북마크, 링크 및 액션 API
     fn FPDFBookmark_GetFirstChild(document: *mut c_void, bookmark: *mut c_void) -> *mut c_void;
     fn FPDFBookmark_GetNextSibling(document: *mut c_void, bookmark: *mut c_void) -> *mut c_void;
     fn FPDFBookmark_GetTitle(
@@ -443,6 +451,14 @@ enum LinkTarget {
     ExternalUri(String),
 }
 
+#[derive(Clone)]
+struct TextSelection {
+    page_index: i32,
+    anchor_char: i32,
+    rects: Vec<PdfRect>,
+    text: String,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum SidebarTab {
     Bookmarks,
@@ -462,6 +478,7 @@ enum InputMode {
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum ActiveTool {
     Pan,
+    TextSelect,
     Highlight,
     AreaHighlight,
     Underline,
@@ -517,23 +534,24 @@ struct ToolbarButton {
 }
 
 const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
-    ToolbarButton { id: IDM_FILE_OPEN, label: "📂 열기", width: 64 },
-    ToolbarButton { id: IDM_FILE_SAVE, label: "💾 저장", width: 64 },
-    ToolbarButton { id: IDM_VIEW_ZOOM_OUT, label: "🔍-", width: 44 },
-    ToolbarButton { id: IDM_VIEW_ZOOM_IN, label: "🔍+", width: 44 },
-    ToolbarButton { id: IDM_VIEW_FIT_WIDTH, label: "↔ 폭맞춤", width: 72 },
-    ToolbarButton { id: IDM_VIEW_SPREAD, label: "📖 2p양면", width: 74 },
-    ToolbarButton { id: IDM_THEME_DARK_DOC, label: "🌙 다크", width: 64 },
-    ToolbarButton { id: IDM_VIEW_BOOKMARKS, label: "📑 목차", width: 64 },
-    ToolbarButton { id: IDM_VIEW_THUMBNAILS, label: "🖼 썸네일", width: 74 },
-    ToolbarButton { id: IDM_ANNOT_NONE, label: "✋ 이동", width: 64 },
-    ToolbarButton { id: IDM_ANNOT_HIGHLIGHT, label: "🖍 강조", width: 64 },
-    ToolbarButton { id: IDM_ANNOT_PENCIL, label: "✏ 연필", width: 64 },
-    ToolbarButton { id: IDM_SEC_REDACT_TOOL, label: "⬛ 교정", width: 64 },
-    ToolbarButton { id: IDM_EDIT_ADD_TEXT, label: "➕ 텍스트", width: 74 },
-    ToolbarButton { id: IDM_TOOL_SEARCH, label: "🔎 검색", width: 64 },
-    ToolbarButton { id: IDM_TB_PREV_PAGE, label: "◀ 이전", width: 60 },
-    ToolbarButton { id: IDM_TB_NEXT_PAGE, label: "다음 ▶", width: 60 },
+    ToolbarButton { id: IDM_FILE_OPEN, label: "📂 열기", width: 62 },
+    ToolbarButton { id: IDM_FILE_SAVE, label: "💾 저장", width: 62 },
+    ToolbarButton { id: IDM_VIEW_ZOOM_OUT, label: "🔍-", width: 42 },
+    ToolbarButton { id: IDM_VIEW_ZOOM_IN, label: "🔍+", width: 42 },
+    ToolbarButton { id: IDM_VIEW_FIT_WIDTH, label: "↔ 폭맞춤", width: 70 },
+    ToolbarButton { id: IDM_VIEW_SPREAD, label: "📖 2p양면", width: 72 },
+    ToolbarButton { id: IDM_THEME_DARK_DOC, label: "🌙 다크", width: 62 },
+    ToolbarButton { id: IDM_VIEW_BOOKMARKS, label: "📑 목차", width: 62 },
+    ToolbarButton { id: IDM_VIEW_THUMBNAILS, label: "🖼 썸네일", width: 72 },
+    ToolbarButton { id: IDM_ANNOT_NONE, label: "✋ 이동", width: 62 },
+    ToolbarButton { id: IDM_ANNOT_TEXT_SELECT, label: "🔤 선택", width: 62 },
+    ToolbarButton { id: IDM_ANNOT_HIGHLIGHT, label: "🖍 강조", width: 62 },
+    ToolbarButton { id: IDM_ANNOT_PENCIL, label: "✏ 연필", width: 62 },
+    ToolbarButton { id: IDM_SEC_REDACT_TOOL, label: "⬛ 교정", width: 62 },
+    ToolbarButton { id: IDM_EDIT_ADD_TEXT, label: "➕ 텍스트", width: 72 },
+    ToolbarButton { id: IDM_TOOL_SEARCH, label: "🔎 검색", width: 62 },
+    ToolbarButton { id: IDM_TB_PREV_PAGE, label: "◀", width: 34 },
+    ToolbarButton { id: IDM_TB_NEXT_PAGE, label: "▶", width: 34 },
 ];
 
 struct AppState {
@@ -577,6 +595,7 @@ struct AppState {
     status_msg: Option<String>,
     hover_tb_id: Option<u16>,
     hovered_link: Option<LinkTarget>,
+    text_selection: Option<TextSelection>,
 
     input_mode: InputMode,
     ignore_next_char: bool,
@@ -655,6 +674,7 @@ impl AppState {
             status_msg: None,
             hover_tb_id: None,
             hovered_link: None,
+            text_selection: None,
             input_mode: InputMode::Normal,
             ignore_next_char: false,
             text_prompt_buf: String::new(),
@@ -697,30 +717,28 @@ impl AppState {
         }
     }
 
-    /// 클라이언트 좌표(client_x, client_y) 아래에 있는 PDF 하이퍼링크(내부 페이지 점프 또는 외부 웹 URL)를 탐지합니다.
-    fn detect_link_at_client_pos(&self, client_x: i32, client_y: i32) -> Option<LinkTarget> {
+    /// 클라이언트 좌표(client_x, client_y)가 가리키는 (페이지 인덱스, 페이지 내 상대 X/Y, 페이지 렌더 너비/높이)를 반환합니다.
+    fn hit_test_page_area(&self, client_x: i32, client_y: i32) -> Option<(i32, i32, i32, i32, i32)> {
         if self.doc.is_null() || self.page_count <= 0 || self.bmp_width <= 0 {
             return None;
         }
         let rel_x = client_x - self.last_draw_x;
         let rel_y = client_y - self.last_draw_y;
 
-        // 1페이지 영역 히트 테스트
         if rel_x >= self.p1_rect_in_bmp.left
             && rel_x < self.p1_rect_in_bmp.right
             && rel_y >= self.p1_rect_in_bmp.top
             && rel_y < self.p1_rect_in_bmp.bottom
         {
-            return self.query_link_on_page(
+            return Some((
                 self.current_page,
                 rel_x - self.p1_rect_in_bmp.left,
                 rel_y - self.p1_rect_in_bmp.top,
                 self.p1_rect_in_bmp.right - self.p1_rect_in_bmp.left,
                 self.p1_rect_in_bmp.bottom - self.p1_rect_in_bmp.top,
-            );
+            ));
         }
 
-        // 2페이지 양면 보기 시 오른쪽 페이지 영역 히트 테스트
         if let Some(p2_rc) = self.p2_rect_in_bmp {
             if self.current_page + 1 < self.page_count
                 && rel_x >= p2_rc.left
@@ -728,17 +746,136 @@ impl AppState {
                 && rel_y >= p2_rc.top
                 && rel_y < p2_rc.bottom
             {
-                return self.query_link_on_page(
+                return Some((
                     self.current_page + 1,
                     rel_x - p2_rc.left,
                     rel_y - p2_rc.top,
                     p2_rc.right - p2_rc.left,
                     p2_rc.bottom - p2_rc.top,
-                );
+                ));
             }
         }
 
         None
+    }
+
+    /// 클라이언트 좌표 아래의 PDF 문자 인덱스를 조회합니다.
+    fn get_char_index_at_client_pos(&self, client_x: i32, client_y: i32) -> Option<(i32, i32)> {
+        let (page_idx, dev_x, dev_y, size_x, size_y) = self.hit_test_page_area(client_x, client_y)?;
+        if size_x <= 0 || size_y <= 0 {
+            return None;
+        }
+        unsafe {
+            let page = FPDF_LoadPage(self.doc, page_idx);
+            if page.is_null() {
+                return None;
+            }
+            let text_page = FPDFText_LoadPage(page);
+            if text_page.is_null() {
+                FPDF_ClosePage(page);
+                return None;
+            }
+
+            let mut page_x: c_double = 0.0;
+            let mut page_y: c_double = 0.0;
+            FPDF_DeviceToPage(
+                page,
+                0,
+                0,
+                size_x,
+                size_y,
+                self.rotation,
+                dev_x,
+                dev_y,
+                &mut page_x,
+                &mut page_y,
+            );
+
+            let char_idx = FPDFText_GetCharIndexAtPos(text_page, page_x, page_y, 12.0, 12.0);
+            FPDFText_ClosePage(text_page);
+            FPDF_ClosePage(page);
+
+            if char_idx >= 0 {
+                Some((page_idx, char_idx))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// 지정된 페이지에서 [start_char..=end_char] 구간의 선택 사각형(PdfRect)과 실제 문자열을 추출합니다.
+    fn build_text_selection(&self, page_idx: i32, anchor_char: i32, cur_char: i32) -> Option<TextSelection> {
+        if self.doc.is_null() || page_idx < 0 || page_idx >= self.page_count {
+            return None;
+        }
+        let s_idx = anchor_char.min(cur_char);
+        let e_idx = anchor_char.max(cur_char);
+        let count = e_idx - s_idx + 1;
+        if count <= 0 {
+            return None;
+        }
+
+        unsafe {
+            let page = FPDF_LoadPage(self.doc, page_idx);
+            if page.is_null() {
+                return None;
+            }
+            let text_page = FPDFText_LoadPage(page);
+            if text_page.is_null() {
+                FPDF_ClosePage(page);
+                return None;
+            }
+
+            let rect_count = FPDFText_CountRects(text_page, s_idx, count);
+            let mut rects = Vec::new();
+            for r in 0..rect_count {
+                let (mut left, mut top, mut right, mut bottom) = (0.0, 0.0, 0.0, 0.0);
+                if FPDFText_GetRect(
+                    text_page,
+                    r,
+                    &mut left,
+                    &mut top,
+                    &mut right,
+                    &mut bottom,
+                ) != 0
+                {
+                    rects.push(PdfRect {
+                        left,
+                        top,
+                        right,
+                        bottom,
+                    });
+                }
+            }
+
+            let mut buf = vec![0u16; (count + 2) as usize];
+            let written = FPDFText_GetText(text_page, s_idx, count, buf.as_mut_ptr());
+            let selected_text = if written > 0 {
+                let valid_len = (written as usize).saturating_sub(1);
+                String::from_utf16_lossy(&buf[..valid_len])
+            } else {
+                String::new()
+            };
+
+            FPDFText_ClosePage(text_page);
+            FPDF_ClosePage(page);
+
+            if rects.is_empty() && selected_text.is_empty() {
+                None
+            } else {
+                Some(TextSelection {
+                    page_index: page_idx,
+                    anchor_char,
+                    rects,
+                    text: selected_text,
+                })
+            }
+        }
+    }
+
+    fn detect_link_at_client_pos(&self, client_x: i32, client_y: i32) -> Option<LinkTarget> {
+        let (page_idx, dev_x, dev_y, size_x, size_y) = self.hit_test_page_area(client_x, client_y)?;
+        self.query_link_on_page(page_idx, dev_x, dev_y, size_x, size_y)
     }
 
     fn query_link_on_page(
@@ -777,7 +914,6 @@ impl AppState {
             let mut result = None;
 
             if !link.is_null() {
-                // 1) 직접 목적지(Dest)가 지정된 내부 페이지 링크 확인
                 let dest = FPDFLink_GetDest(self.doc, link);
                 if !dest.is_null() {
                     let target_p = FPDFDest_GetDestPageIndex(self.doc, dest);
@@ -786,7 +922,6 @@ impl AppState {
                     }
                 }
 
-                // 2) 액션(Action) 기반 링크 (GoTo 내부 이동 또는 URI 외부 웹 링크) 확인
                 if result.is_none() {
                     let action = FPDFLink_GetAction(link);
                     if !action.is_null() {
@@ -940,6 +1075,7 @@ impl AppState {
             self.current_page = 0;
             self.overlays.clear();
             self.bookmarks.clear();
+            self.text_selection = None;
             self.clear_thumbnail_cache();
             self.thumb_scroll = 0;
             self.status_msg = Some("새 빈 PDF 문서(A4)가 생성되었습니다".to_string());
@@ -1082,6 +1218,7 @@ impl AppState {
         self.overlays.clear();
         self.clear_thumbnail_cache();
         self.hovered_link = None;
+        self.text_selection = None;
         self.status_msg = None;
         self.input_mode = InputMode::Normal;
         self.search_query.clear();
@@ -1634,15 +1771,15 @@ impl AppState {
 
     fn show_help_dialog(&self, hwnd: HWND) {
         let help_text = "\
-[본문 하이퍼링크 클릭 이동 (FPDFLink)]
-• 문서 본문 안의 목차 링크(내부 페이지 이동)나 웹 주소(https://...) 위에 마우스를 올리면 손가락 커서로 변경되며 하단 상태바에 대상 경로가 표시됩니다.
-• 해당 링크를 마우스로 클릭하면 목표 페이지로 즉시 점프하거나 기본 웹 브라우저가 실행됩니다.
+[본문 텍스트 선택 및 부분 복사 ([🔤 선택] 도구)]
+• 상단 툴바의 [🔤 선택] 버튼을 클릭한 뒤 본문 텍스트 위를 마우스로 드래그하면 선택한 글자 영역이 하늘색 블록으로 표시됩니다.
+• 선택한 상태에서 Ctrl+C (또는 C키)를 누르면 선택한 구절만 클립보드에 복사됩니다. (ESC 키로 선택 해제)
 
-[좌측 사이드바 탭 ([📑 목차] / [🖼 썸네일])]
-• 사이드바 상단 탭을 클릭해 [목차(Bookmarks)]와 [페이지 썸네일 미리보기]를 즉시 전환하고 클릭 이동할 수 있습니다.
+[본문 하이퍼링크 클릭 이동]
+• 기본 손 도구([✋ 이동]) 상태에서 본문 내 목차 링크나 웹 URL을 클릭하면 해당 페이지 또는 웹 브라우저로 즉시 이동합니다.
 
 [단축키 안내]
-• O: 열기 | S: BMP 저장 | Ctrl+S: PDF 저장 | C: 텍스트 복사 | I: 문서 정보 | H / F1: 도움말
+• O: 열기 | S: BMP 저장 | Ctrl+S: PDF 저장 | Ctrl+C / C: 선택 영역(또는 전체) 복사 | I: 문서 정보 | H / F1: 도움말
 • Home / End: 첫 페이지 / 마지막 페이지 | G: 페이지 이동 | B: 사이드바 토글 | [ / ]: 이전/다음 북마크
 • W: 창 너비 맞춤 | D: 2p 양면 보기 | V: 다크 모드 | R / Shift+R: 90° 회전 | F11: 전체 화면 | F: 전체 검색";
 
@@ -2063,6 +2200,15 @@ impl AppState {
                 Some(self.active_match),
             );
 
+            // 현재 페이지에 드래그 선택된 텍스트가 있으면 하늘색 반투명 하이라이트 적용
+            if let Some(ref sel) = self.text_selection.clone() {
+                if sel.page_index == self.current_page {
+                    self.draw_selection_rects_for_page(
+                        page1, 0, y_off1, target_w1, target_h1, &sel.rects,
+                    );
+                }
+            }
+
             if !page2.is_null() {
                 let x_off2 = target_w1 + gap;
                 let y_off2 = (total_h - target_h2) / 2;
@@ -2080,10 +2226,90 @@ impl AppState {
                         None,
                     );
                 }
+                if let Some(ref sel) = self.text_selection.clone() {
+                    if sel.page_index == self.current_page + 1 {
+                        self.draw_selection_rects_for_page(
+                            page2, x_off2, y_off2, target_w2, target_h2, &sel.rects,
+                        );
+                    }
+                }
                 FPDF_ClosePage(page2);
             }
 
             FPDF_ClosePage(page1);
+        }
+    }
+
+    unsafe fn draw_selection_rects_for_page(
+        &mut self,
+        page: *mut c_void,
+        offset_x: i32,
+        offset_y: i32,
+        page_w: i32,
+        page_h: i32,
+        rects: &[PdfRect],
+    ) {
+        if rects.is_empty() {
+            return;
+        }
+        let total_w = self.bmp_width;
+        let total_h = self.bmp_height;
+        let (sel_r, sel_g, sel_b, alpha) = (51u32, 153u32, 255u32, 110u32);
+        let inv_alpha = 255 - alpha;
+
+        for rect in rects {
+            let (mut dev_x1, mut dev_y1) = (0, 0);
+            let (mut dev_x2, mut dev_y2) = (0, 0);
+
+            FPDF_PageToDevice(
+                page,
+                0,
+                0,
+                page_w,
+                page_h,
+                self.rotation,
+                rect.left,
+                rect.top,
+                &mut dev_x1,
+                &mut dev_y1,
+            );
+            FPDF_PageToDevice(
+                page,
+                0,
+                0,
+                page_w,
+                page_h,
+                self.rotation,
+                rect.right,
+                rect.bottom,
+                &mut dev_x2,
+                &mut dev_y2,
+            );
+
+            let x_min = (dev_x1.min(dev_x2) - 1).clamp(0, page_w - 1) + offset_x;
+            let x_max = (dev_x1.max(dev_x2) + 1).clamp(0, page_w - 1) + offset_x;
+            let y_min = (dev_y1.min(dev_y2) - 1).clamp(0, page_h - 1) + offset_y;
+            let y_max = (dev_y1.max(dev_y2) + 1).clamp(0, page_h - 1) + offset_y;
+
+            for y in y_min..=y_max {
+                if y < 0 || y >= total_h {
+                    continue;
+                }
+                let row_offset = (y * total_w * 4) as usize;
+                for x in x_min..=x_max {
+                    if x < 0 || x >= total_w {
+                        continue;
+                    }
+                    let p = row_offset + (x * 4) as usize;
+                    let b = self.pixels[p] as u32;
+                    let g = self.pixels[p + 1] as u32;
+                    let r = self.pixels[p + 2] as u32;
+
+                    self.pixels[p] = ((b * inv_alpha + sel_b * alpha) / 255) as u8;
+                    self.pixels[p + 1] = ((g * inv_alpha + sel_g * alpha) / 255) as u8;
+                    self.pixels[p + 2] = ((r * inv_alpha + sel_r * alpha) / 255) as u8;
+                }
+            }
         }
     }
 
@@ -2329,6 +2555,7 @@ impl AppState {
             self.pending_align_top = self.fit_width;
             self.pending_align_bottom = false;
             self.hovered_link = None;
+            self.text_selection = None;
             self.status_msg = None;
 
             let mut rc: RECT = unsafe { zeroed() };
@@ -2633,10 +2860,26 @@ impl AppState {
         self.refresh_view(hwnd, true);
     }
 
+    /// 마우스로 드래그하여 선택한 구절이 있으면 선택 구절만 복사하고, 없으면 현재 페이지 전체를 복사합니다.
     fn copy_text_to_clipboard(&mut self, hwnd: HWND) {
         if self.doc.is_null() {
             return;
         }
+
+        if let Some(ref sel) = self.text_selection {
+            if !sel.text.is_empty() {
+                let normalized = sel.text.replace("\r\n", "\n").replace('\n', "\r\n");
+                let char_len = normalized.chars().count();
+                if set_clipboard_unicode_text(hwnd, &normalized) {
+                    self.status_msg = Some(format!("선택 텍스트 복사 완료 ({}자)", char_len));
+                } else {
+                    self.status_msg = Some("클립보드 복사 실패".to_string());
+                }
+                self.refresh_view(hwnd, false);
+                return;
+            }
+        }
+
         let mut combined = self
             .extract_page_text_at(self.current_page)
             .unwrap_or_default();
@@ -2656,14 +2899,14 @@ impl AppState {
             let normalized = combined.replace("\r\n", "\n").replace('\n', "\r\n");
             let char_len = normalized.chars().count();
             if set_clipboard_unicode_text(hwnd, &normalized) {
-                self.status_msg = Some(format!("텍스트 복사 완료 ({}자)", char_len));
+                self.status_msg = Some(format!("페이지 전체 텍스트 복사 완료 ({}자)", char_len));
             } else {
                 self.status_msg = Some("클립보드 복사 실패".to_string());
             }
         } else {
             self.status_msg = Some("이 페이지에 추출할 텍스트가 없습니다".to_string());
         }
-        update_window_title(hwnd, self);
+        self.refresh_view(hwnd, false);
     }
 
     fn is_toolbar_btn_active(&self, id: u16) -> bool {
@@ -2678,6 +2921,7 @@ impl AppState {
                 self.show_sidebar && self.sidebar_tab == SidebarTab::Thumbnails
             }
             IDM_ANNOT_NONE => self.active_tool == ActiveTool::Pan,
+            IDM_ANNOT_TEXT_SELECT => self.active_tool == ActiveTool::TextSelect,
             IDM_ANNOT_HIGHLIGHT => self.active_tool == ActiveTool::Highlight,
             IDM_ANNOT_PENCIL => self.active_tool == ActiveTool::Pencil,
             IDM_SEC_REDACT_TOOL => self.active_tool == ActiveTool::RedactBox,
@@ -3006,7 +3250,7 @@ fn hit_test_toolbar(click_x: i32, click_y: i32) -> Option<u16> {
         if click_x >= cur_x && click_x <= cur_x + btn.width {
             return Some(btn.id);
         }
-        cur_x += btn.width + 5;
+        cur_x += btn.width + 4;
     }
     None
 }
@@ -3069,9 +3313,9 @@ unsafe fn draw_top_toolbar(hdc: *mut c_void, client_w: i32, state: &AppState) {
             },
         );
         let w_lbl: Vec<u16> = btn.label.encode_utf16().collect();
-        TextOutW(hdc, cur_x + 7, 11, w_lbl.as_ptr(), w_lbl.len() as i32);
+        TextOutW(hdc, cur_x + 6, 11, w_lbl.as_ptr(), w_lbl.len() as i32);
 
-        cur_x += btn.width + 5;
+        cur_x += btn.width + 4;
     }
 
     SelectObject(hdc, old_font);
@@ -3155,12 +3399,14 @@ unsafe fn draw_bottom_status_bar(
         String::from("📐 문서 대기 중")
     };
 
-    // 하이퍼링크 위에 마우스가 올라가 있으면 URL/대상 페이지를 하단 상태바에 우선 표시
     let status_info = if let Some(ref link) = state.hovered_link {
         match link {
             LinkTarget::InternalPage(p) => format!("🔗 내부 링크: {}페이지로 이동 (클릭)", p + 1),
             LinkTarget::ExternalUri(uri) => format!("🌐 웹 링크: {} (클릭하여 열기)", uri),
         }
+    } else if let Some(ref sel) = state.text_selection {
+        let char_cnt = sel.text.chars().count();
+        format!("🔤 텍스트 선택됨 ({}자) - Ctrl+C로 복사, ESC로 해제", char_cnt)
     } else if let Some(ref msg) = state.status_msg {
         format!("{}  |  💡 {}", dim_text, msg)
     } else {
@@ -3169,7 +3415,7 @@ unsafe fn draw_bottom_status_bar(
 
     SetTextColor(
         hdc,
-        if state.hovered_link.is_some() {
+        if state.hovered_link.is_some() || state.text_selection.is_some() {
             0x0066EAFF
         } else {
             0x00CCCCCC
@@ -3575,7 +3821,8 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_sub(hmenu, m_edit, "편집(&E)");
 
     let m_annot = CreatePopupMenu();
-    add_item(m_annot, IDM_ANNOT_NONE, "기본 손 도구 (화면 이동 Pan 및 링크 클릭 모드)");
+    add_item(m_annot, IDM_ANNOT_NONE, "기본 손 도구 (화면 이동 Pan 및 링크 클릭)");
+    add_item(m_annot, IDM_ANNOT_TEXT_SELECT, "텍스트 선택 도구 (드래그 선택 후 Ctrl+C 복사)");
     add_sep(m_annot);
     add_item(m_annot, IDM_ANNOT_HIGHLIGHT, "강조 (형광펜 드래그)");
     add_item(m_annot, IDM_ANNOT_AREA_HL, "영역 강조 (사각 영역 하이라이트)");
@@ -3605,7 +3852,7 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_conv, IDM_CONV_TO_RTF, "Word 호환 문서로 변환 (.rtf)...");
     add_item(m_conv, IDM_CONV_TO_CSV, "Excel 호환 데이터로 변환 (.csv)...");
     add_sep(m_conv);
-    add_item(m_conv, IDM_CONV_BATCH_TXT, "현재 페이지 텍스트 클립보드 복사\tC");
+    add_item(m_conv, IDM_CONV_BATCH_TXT, "선택 영역(또는 페이지 전체) 텍스트 복사\tCtrl+C");
     add_sub(hmenu, m_conv, "변환(&C)");
 
     let m_view = CreatePopupMenu();
@@ -4147,7 +4394,13 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
 
         IDM_ANNOT_NONE => {
             state.active_tool = ActiveTool::Pan;
-            state.status_msg = Some("기본 손 도구 (화면 드래그 이동 및 링크 클릭 모드)".to_string());
+            state.text_selection = None;
+            state.status_msg = Some("기본 손 도구 (화면 드래그 이동 및 링크 클릭)".to_string());
+            state.refresh_view(hwnd, true);
+        }
+        IDM_ANNOT_TEXT_SELECT => {
+            state.active_tool = ActiveTool::TextSelect;
+            state.status_msg = Some("텍스트 선택 도구: 글자 위를 드래그 후 Ctrl+C로 복사하세요".to_string());
             state.refresh_view(hwnd, false);
         }
         IDM_ANNOT_HIGHLIGHT => {
@@ -4468,10 +4721,14 @@ unsafe extern "system" fn wnd_proc(
             if !state_ptr.is_null() {
                 let state = &*state_ptr;
                 let hit_area = (lparam & 0xFFFF) as u16;
-                // HTCLIENT = 1
-                if hit_area == 1 && state.hovered_link.is_some() {
-                    SetCursor(LoadCursorW(null_mut(), IDC_HAND));
-                    return 1;
+                if hit_area == 1 {
+                    if state.hovered_link.is_some() {
+                        SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+                        return 1;
+                    } else if state.active_tool == ActiveTool::TextSelect {
+                        SetCursor(LoadCursorW(null_mut(), IDC_IBEAM));
+                        return 1;
+                    }
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -4583,6 +4840,26 @@ unsafe extern "system" fn wnd_proc(
                     return 0;
                 }
 
+                // 텍스트 선택 도구(TextSelect) 활성 시 시작 문자 인덱스 기록
+                if state.active_tool == ActiveTool::TextSelect {
+                    if let Some((page_idx, char_idx)) =
+                        state.get_char_index_at_client_pos(click_x, click_y)
+                    {
+                        state.text_selection =
+                            state.build_text_selection(page_idx, char_idx, char_idx);
+                    } else if state.text_selection.is_some() {
+                        state.text_selection = None;
+                    }
+                    state.is_dragging = true;
+                    state.mouse_down_x = click_x;
+                    state.mouse_down_y = click_y;
+                    state.drag_start_x = click_x;
+                    state.drag_start_y = click_y;
+                    SetCapture(hwnd);
+                    state.refresh_view(hwnd, true);
+                    return 0;
+                }
+
                 if state.bmp_width > 0 && state.bmp_height > 0 {
                     let nx = (click_x - state.last_draw_x) as f64 / state.bmp_width as f64;
                     let ny = (click_y - state.last_draw_y) as f64 / state.bmp_height as f64;
@@ -4639,7 +4916,6 @@ unsafe extern "system" fn wnd_proc(
                 let cur_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
 
                 if !state.is_dragging {
-                    // 1. 상단 툴바 호버 갱신
                     if !state.is_fullscreen {
                         let new_hover = if cur_y < TOOLBAR_HEIGHT {
                             hit_test_toolbar(cur_x, cur_y)
@@ -4658,7 +4934,6 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
 
-                    // 2. 본문 하이퍼링크 호버 탐지 (손 도구 모드일 때)
                     let new_link = if state.active_tool == ActiveTool::Pan
                         && cur_x >= state.sidebar_offset()
                     {
@@ -4671,6 +4946,8 @@ unsafe extern "system" fn wnd_proc(
                         state.hovered_link = new_link;
                         if state.hovered_link.is_some() {
                             SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+                        } else if state.active_tool == ActiveTool::TextSelect {
+                            SetCursor(LoadCursorW(null_mut(), IDC_IBEAM));
                         } else {
                             SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
                         }
@@ -4685,6 +4962,24 @@ unsafe extern "system" fn wnd_proc(
                         InvalidateRect(hwnd, &sb_rc, 0);
                     }
                 } else {
+                    if state.active_tool == ActiveTool::TextSelect {
+                        if let Some(ref existing) = state.text_selection.clone() {
+                            if let Some((page_idx, cur_char)) =
+                                state.get_char_index_at_client_pos(cur_x, cur_y)
+                            {
+                                if page_idx == existing.page_index {
+                                    state.text_selection = state.build_text_selection(
+                                        page_idx,
+                                        existing.anchor_char,
+                                        cur_char,
+                                    );
+                                    state.refresh_view(hwnd, true);
+                                }
+                            }
+                        }
+                        return 0;
+                    }
+
                     if state.active_tool == ActiveTool::Pan {
                         state.pan_x += cur_x - state.drag_start_x;
                         state.pan_y += cur_y - state.drag_start_y;
@@ -4716,7 +5011,11 @@ unsafe extern "system" fn wnd_proc(
                     let end_x = (lparam & 0xFFFF) as i16 as i32;
                     let end_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
 
-                    // 손 도구 모드에서 드래그 이동 거리(4px 미만)가 거의 없는 순수 클릭이면 하이퍼링크 실행
+                    if state.active_tool == ActiveTool::TextSelect {
+                        state.refresh_view(hwnd, true);
+                        return 0;
+                    }
+
                     if state.active_tool == ActiveTool::Pan {
                         let move_dist = (end_x - state.mouse_down_x)
                             .abs()
@@ -5075,7 +5374,11 @@ unsafe extern "system" fn wnd_proc(
                     }
                     0x4F => handle_menu_command(hwnd, IDM_FILE_OPEN, state),
                     VK_ESCAPE => {
-                        if state.active_tool != ActiveTool::Pan {
+                        if state.text_selection.is_some() {
+                            state.text_selection = None;
+                            state.status_msg = Some("텍스트 선택 영역이 해제되었습니다".to_string());
+                            state.refresh_view(hwnd, true);
+                        } else if state.active_tool != ActiveTool::Pan {
                             state.active_tool = ActiveTool::Pan;
                             state.status_msg = Some("기본 손 도구 모드로 복귀".to_string());
                             state.refresh_view(hwnd, false);
@@ -5229,7 +5532,7 @@ fn main() {
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             60,
             60,
-            1460,
+            1480,
             1060,
             null_mut(),
             hmenu as _,
