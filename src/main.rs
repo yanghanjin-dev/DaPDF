@@ -13,7 +13,7 @@ use std::ptr::{copy_nonoverlapping, null, null_mut};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
-        BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush,
+        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen, CreateSolidBrush,
         DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetMonitorInfoW, GetStockObject,
         InvalidateRect, LineTo, MonitorFromWindow, MoveToEx, Rectangle, ReleaseDC, ScreenToClient,
         SelectObject, SetBkMode, SetTextColor, StretchDIBits, TextOutW, BITMAPINFO,
@@ -56,6 +56,32 @@ use windows_sys::Win32::{
 };
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BLENDFUNCTION {
+    BlendOp: u8,
+    BlendFlags: u8,
+    SourceConstantAlpha: u8,
+    AlphaFormat: u8,
+}
+
+#[link(name = "msimg32")]
+extern "system" {
+    fn AlphaBlend(
+        hdcDest: *mut c_void,
+        xoriginDest: i32,
+        yoriginDest: i32,
+        wDest: i32,
+        hDest: i32,
+        hdcSrc: *mut c_void,
+        xoriginSrc: i32,
+        yoriginSrc: i32,
+        wSrc: i32,
+        hSrc: i32,
+        ftn: BLENDFUNCTION,
+    ) -> i32;
+}
 const CF_BITMAP: u32 = 2;
 const CF_UNICODETEXT: u32 = 13;
 const SIDEBAR_WIDTH: i32 = 280;
@@ -4856,7 +4882,7 @@ unsafe extern "system" fn wnd_proc(
                     state.drag_start_x = click_x;
                     state.drag_start_y = click_y;
                     SetCapture(hwnd);
-                    state.refresh_view(hwnd, true);
+                    InvalidateRect(hwnd, null(), 0);
                     return 0;
                 }
 
@@ -4973,7 +4999,7 @@ unsafe extern "system" fn wnd_proc(
                                         existing.anchor_char,
                                         cur_char,
                                     );
-                                    state.refresh_view(hwnd, true);
+                                    InvalidateRect(hwnd, null(), 0);
                                 }
                             }
                         }
@@ -5012,7 +5038,8 @@ unsafe extern "system" fn wnd_proc(
                     let end_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
 
                     if state.active_tool == ActiveTool::TextSelect {
-                        state.refresh_view(hwnd, true);
+                        update_window_title(hwnd, state);
+                        InvalidateRect(hwnd, null(), 0);
                         return 0;
                     }
 
@@ -5400,12 +5427,17 @@ unsafe extern "system" fn wnd_proc(
 
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = zeroed();
-            let hdc = BeginPaint(hwnd, &mut ps);
+            let screen_hdc = BeginPaint(hwnd, &mut ps);
 
             let mut rc: RECT = zeroed();
             GetClientRect(hwnd, &mut rc);
-            let client_w = rc.right - rc.left;
-            let client_h = rc.bottom - rc.top;
+            let client_w = (rc.right - rc.left).max(1);
+            let client_h = (rc.bottom - rc.top).max(1);
+
+            // 오프스크린 메모리 DC 생성 (더블 버퍼링으로 화면 깜빡임 100% 제거)
+            let hdc = CreateCompatibleDC(screen_hdc);
+            let hbm = CreateCompatibleBitmap(screen_hdc, client_w, client_h);
+            let old_bm = SelectObject(hdc, hbm as _);
 
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
@@ -5459,6 +5491,61 @@ unsafe extern "system" fn wnd_proc(
                         SRCCOPY,
                     );
 
+                    // 텍스트 드래그 선택 영역 실시간 반투명 하늘색 채우기 (AlphaBlend)
+                    if let Some(ref sel) = state.text_selection {
+                        let target_info = if sel.page_index == state.current_page {
+                            Some((sel.page_index, state.p1_rect_in_bmp))
+                        } else if let Some(p2_rc) = state.p2_rect_in_bmp {
+                            if sel.page_index == state.current_page + 1 {
+                                Some((sel.page_index, p2_rc))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some((p_idx, p_rc)) = target_info {
+                            let page = FPDF_LoadPage(state.doc, p_idx);
+                            if !page.is_null() {
+                                let pw = p_rc.right - p_rc.left;
+                                let ph = p_rc.bottom - p_rc.top;
+
+                                // 1x1 하늘색(BGR: 0x00FF9933) 소스 비트맵 생성
+                                let src_dc = CreateCompatibleDC(hdc);
+                                let src_bm = CreateCompatibleBitmap(screen_hdc, 1, 1);
+                                let old_src_bm = SelectObject(src_dc, src_bm as _);
+                                let fill_rc = RECT { left: 0, top: 0, right: 1, bottom: 1 };
+                                let fill_br = CreateSolidBrush(0x00FF9933);
+                                FillRect(src_dc, &fill_rc, fill_br);
+                                DeleteObject(fill_br as _);
+
+                                let bf = BLENDFUNCTION {
+                                    BlendOp: 0, // AC_SRC_OVER
+                                    BlendFlags: 0,
+                                    SourceConstantAlpha: 96, // 약 38% 반투명 하늘색
+                                    AlphaFormat: 0,
+                                };
+
+                                for r in &sel.rects {
+                                    let (mut dx1, mut dy1, mut dx2, mut dy2) = (0, 0, 0, 0);
+                                    FPDF_PageToDevice(page, 0, 0, pw, ph, state.rotation, r.left, r.top, &mut dx1, &mut dy1);
+                                    FPDF_PageToDevice(page, 0, 0, pw, ph, state.rotation, r.right, r.bottom, &mut dx2, &mut dy2);
+                                    let rx1 = x + p_rc.left + dx1.min(dx2);
+                                    let ry1 = y + p_rc.top + dy1.min(dy2);
+                                    let rw = (dx1.max(dx2) - dx1.min(dx2)).max(1);
+                                    let rh = (dy1.max(dy2) - dy1.min(dy2)).max(1);
+                                    AlphaBlend(hdc as *mut c_void, rx1, ry1, rw, rh, src_dc as *mut c_void, 0, 0, 1, 1, bf);
+                                }
+
+                                SelectObject(src_dc, old_src_bm);
+                                DeleteObject(src_bm as _);
+                                DeleteDC(src_dc);
+                                FPDF_ClosePage(page);
+                            }
+                        }
+                    }
+
                     draw_page_overlays_and_guides(
                         hdc as *mut c_void,
                         x,
@@ -5478,6 +5565,13 @@ unsafe extern "system" fn wnd_proc(
                     draw_bottom_status_bar(hdc as *mut c_void, client_w, client_h, state);
                 }
             }
+
+            // 완성된 가상 화면을 실제 모니터 화면으로 단 한 번에 전송 (깜빡임 원천 차단)
+            BitBlt(screen_hdc, 0, 0, client_w, client_h, hdc, 0, 0, SRCCOPY);
+
+            SelectObject(hdc, old_bm);
+            DeleteObject(hbm as _);
+            DeleteDC(hdc);
 
             EndPaint(hwnd, &ps);
             0
@@ -5564,3 +5658,5 @@ fn main() {
         FPDF_DestroyLibrary();
     }
 }
+
+
