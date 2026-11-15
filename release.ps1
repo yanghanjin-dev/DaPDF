@@ -1,34 +1,39 @@
-$ErrorActionPreference = "Stop"
-
-$VersionNum = "0.0.2"
-$Tag = "v$VersionNum"
-$Repo = "yanghanjin-dev/DaPDF"
-$DistDir = "dist"
-$ZipName = "DaPDF-$Tag-win-x64.zip"
-
-Write-Host "[1/5] Setting version to $VersionNum..." -ForegroundColor Cyan
-Set-Content -Path "VERSION" -Value $VersionNum -Encoding Ascii -NoNewline
-
-Write-Host "[2/5] Building Rust Release binary (cargo build --release)..." -ForegroundColor Cyan
-cargo build --release
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[ERROR] Cargo build failed!" -ForegroundColor Red
-    exit $LASTEXITCODE
+param([switch]$SkipTests)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Push-Location $PSScriptRoot
+try {
+    $VersionNum = (Get-Content -LiteralPath 'VERSION' -Raw).Trim()
+    $CargoText = Get-Content -LiteralPath 'Cargo.toml' -Raw
+    if ($VersionNum -notmatch '^\d+\.\d+\.\d+$' -or $CargoText -notmatch ('(?m)^version\s*=\s*"' + [regex]::Escape($VersionNum) + '"')) {
+        throw 'VERSION and Cargo.toml must contain the same semantic version.'
+    }
+    # PDFium must also be discoverable when Cargo places test executables in deps/.
+    $env:PATH = "$PSScriptRoot\vendor\bin;$env:PATH"
+    if (-not $SkipTests) {
+        cargo test --offline
+        if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed.' }
+    }
+    cargo build --release --offline
+    if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
+    $ReleaseDir = Join-Path $PSScriptRoot 'releases'
+    $Stage = Join-Path $PSScriptRoot ('dist\v' + $VersionNum + '-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+    New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
+    Copy-Item -LiteralPath 'target\release\dapdf.exe' -Destination (Join-Path $Stage 'DaPDF.exe')
+    Copy-Item -LiteralPath 'vendor\bin\pdfium.dll' -Destination $Stage
+    Copy-Item -LiteralPath 'README.md','VERSION' -Destination $Stage
+    Copy-Item -LiteralPath "releases\notes-v$VersionNum.md" -Destination (Join-Path $Stage 'RELEASE-NOTES.md')
+    Copy-Item -LiteralPath 'vendor\LICENSE' -Destination (Join-Path $Stage 'LICENSE-PDFium.txt')
+    Copy-Item -LiteralPath 'vendor\licenses' -Destination (Join-Path $Stage 'licenses') -Recurse
+    $ZipName = "DaPDF-v$VersionNum-win-x64.zip"
+    $ZipPath = Join-Path $ReleaseDir $ZipName
+    Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $ZipPath -Force
+    $Hash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath (Join-Path $ReleaseDir "$ZipName.sha256") -Value "$Hash  $ZipName" -Encoding Ascii
+    Write-Host "Package: $ZipPath"
+    Write-Host "SHA256: $Hash"
+    Write-Host "Staging: $Stage"
+} finally {
+    Pop-Location
 }
-
-Write-Host "[3/5] Creating distribution folder ($DistDir)..." -ForegroundColor Cyan
-if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
-New-Item -ItemType Directory -Path $DistDir | Out-Null
-
-Copy-Item "target\release\dapdf.exe" -Destination "$DistDir\dapdf.exe"
-Copy-Item "vendor\bin\pdfium.dll" -Destination "$DistDir\pdfium.dll"
-if (Test-Path "README.md") { Copy-Item "README.md" -Destination "$DistDir\README.md" }
-if (Test-Path "vendor\LICENSE") { Copy-Item "vendor\LICENSE" -Destination "$DistDir\LICENSE-PDFium.txt" }
-
-Write-Host "[4/5] Compressing archive ($ZipName)..." -ForegroundColor Cyan
-if (Test-Path $ZipName) { Remove-Item -Force $ZipName }
-Compress-Archive -Path "$DistDir\*" -DestinationPath $ZipName
-
-Write-Host "[5/5] Opening GitHub Releases page..." -ForegroundColor Green
-Write-Host "SUCCESS! Archive created: $ZipName" -ForegroundColor Green
-Start-Process "https://github.com/$Repo/releases/new?tag=$Tag&title=DaPDF+$Tag"

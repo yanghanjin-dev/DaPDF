@@ -11,6 +11,9 @@ use std::os::raw::{c_char, c_double, c_float, c_int, c_ulong, c_ushort};
 use std::path::Path;
 use std::ptr::{copy_nonoverlapping, null, null_mut};
 
+#[cfg(test)]
+mod regression_tests;
+
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
@@ -1159,10 +1162,6 @@ impl AppState {
                 FPDF_SaveAsCopy(self.doc, &mut ctx.fw, 0)
             };
             if ok == 0 || ctx.buf.is_empty() {
-                if !self.pdf_bytes.is_empty() {
-                    fs::write(path, &self.pdf_bytes).map_err(|e| e.to_string())?;
-                    return Ok(());
-                }
                 return Err("PDFium 문서 저장 실패".to_string());
             }
             fs::write(path, &ctx.buf).map_err(|e| e.to_string())?;
@@ -2888,6 +2887,8 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_file, IDM_FILE_OPEN, "PDF 파일 열기(&O)...\tO");
     add_item(m_file, IDM_FILE_SAVE, "저장(&S)\tCtrl+S");
     add_item(m_file, IDM_FILE_SAVE_AS, "다른 이름으로 저장(&A)...");
+    add_item(m_file, IDM_FILE_SAVE_V14, "PDF 1.4로 저장...");
+    add_item(m_file, IDM_FILE_SAVE_V17, "PDF 1.7로 저장...");
     add_item(m_file, IDM_FILE_PRINT, "인쇄하기(&P)...\tCtrl+P");
     add_item(m_file, IDM_FILE_PROPS, "파일 속성(&I)...\tI");
     add_sep(m_file);
@@ -3151,15 +3152,21 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
         IDM_FILE_FROM_CLIPBOARD => state.create_pdf_from_clipboard(hwnd),
         IDM_FILE_OPEN => {
             if let Some(path) = open_file_dialog(hwnd) {
-                if state.load_file(&path).is_ok() {
-                    state.refresh_view(hwnd, true);
+                match state.load_file(&path) {
+                    Ok(()) => state.refresh_view(hwnd, true),
+                    Err(err) => {
+                        state.status_msg = Some(format!("열기 실패: {}", err));
+                        state.refresh_view(hwnd, false);
+                    }
                 }
             }
         }
         IDM_FILE_SAVE => {
             if let Some(existing) = state.current_path.clone() {
-                let _ = state.save_pdf_to_path(&existing, None);
-                state.status_msg = Some(format!("저장 완료: {}", existing));
+                state.status_msg = Some(match state.save_pdf_to_path(&existing, None) {
+                    Ok(()) => format!("저장 완료: {}", existing),
+                    Err(err) => format!("저장 실패: {}", err),
+                });
                 state.refresh_view(hwnd, false);
             } else {
                 handle_menu_command(hwnd, IDM_FILE_SAVE_AS, state);
@@ -3167,8 +3174,15 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
         }
         IDM_FILE_SAVE_AS | IDM_FILE_SAVE_V14 | IDM_FILE_SAVE_V17 => {
             if let Some(save_path) = save_custom_dialog(hwnd, &state.file_name, "PDF 문서 (*.pdf)\0*.pdf\0\0", "pdf") {
-                let _ = state.save_pdf_to_path(&save_path, None);
-                state.status_msg = Some(format!("PDF 저장 완료: {}", save_path));
+                let version = match cmd_id {
+                    IDM_FILE_SAVE_V14 => Some(14),
+                    IDM_FILE_SAVE_V17 => Some(17),
+                    _ => None,
+                };
+                state.status_msg = Some(match state.save_pdf_to_path(&save_path, version) {
+                    Ok(()) => format!("PDF 저장 완료: {}", save_path),
+                    Err(err) => format!("저장 실패: {}", err),
+                });
                 state.refresh_view(hwnd, false);
             }
         }
@@ -3179,7 +3193,7 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
             pd.Flags = PD_RETURNDC;
             if PrintDlgW(&mut pd) != 0 && !pd.hDC.is_null() {
                 DeleteDC(pd.hDC);
-                state.status_msg = Some("인쇄 작업 전송 완료".to_string());
+                state.status_msg = Some("인쇄 설정을 닫았습니다. 실제 인쇄 전송은 아직 지원하지 않습니다.".to_string());
                 state.refresh_view(hwnd, false);
             }
         }
