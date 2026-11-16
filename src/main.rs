@@ -828,7 +828,7 @@ impl AppState {
             bookmark_scroll: 0,
             thumb_scroll: 0,
             thumb_cache: HashMap::new(),
-            active_tool: ActiveTool::Pan,
+            active_tool: ActiveTool::TextSelect,
             show_annotations: true,
             overlays: Vec::new(),
             signatures: Vec::new(),
@@ -1232,6 +1232,7 @@ impl AppState {
         self.text_selection = None;
         self.status_msg = None;
         self.input_mode = InputMode::Normal;
+        self.active_tool = ActiveTool::TextSelect;
         self.search_query.clear();
         self.search_matches.clear();
         self.active_match = 0;
