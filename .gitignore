@@ -1,6 +1,7 @@
 ﻿/target/
 Cargo.lock
 /dist/
+/.tools/
 *.zip
 RELEASE_NOTES_*.md
 *.exe

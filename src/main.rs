@@ -13,13 +13,18 @@ use std::ptr::{copy_nonoverlapping, null, null_mut};
 
 #[cfg(test)]
 mod regression_tests;
+mod annotations;
+mod printing;
+mod history;
+mod pages;
+mod conversion;
 
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
     Graphics::Gdi::{
         BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-        CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetDIBits,
-        GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx,
+        CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetDIBits,
+        GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, InvalidateRect, LineTo, MonitorFromWindow, MoveToEx,
         Rectangle, ReleaseDC, ScreenToClient, SelectObject, SetBkMode, SetTextColor, StretchDIBits,
         TextOutW, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_GUI_FONT, DIB_RGB_COLORS,
         MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_DOT, PS_SOLID, SRCCOPY, TRANSPARENT,
@@ -37,7 +42,7 @@ use windows_sys::Win32::{
             OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
             OPENFILENAMEW, PD_RETURNDC, PRINTDLGW,
         },
-        HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
+        HiDpi::{GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
         Input::KeyboardAndMouse::{
             GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DOWN, VK_END,
             VK_ESCAPE, VK_F1, VK_F11, VK_F3, VK_HOME, VK_LEFT, VK_NEXT, VK_OEM_4, VK_OEM_6,
@@ -47,14 +52,14 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             AppendMenuW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
             DispatchMessageW, GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW,
-            GetWindowPlacement, LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassW,
+            GetWindowPlacement, LoadCursorW, LoadIconW, MessageBoxW, PostQuitMessage, RegisterClassW,
             SetCursor, SetMenu, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
             SetWindowTextW, ShowWindow, TrackPopupMenu, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
             GWLP_USERDATA, GWL_STYLE, HWND_TOP, IDC_ARROW, IDC_HAND, IDC_IBEAM,
             MB_ICONINFORMATION, MB_OK, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, SWP_FRAMECHANGED,
             SWP_NOOWNERZORDER, SWP_NOZORDER, SW_SHOWNORMAL, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD,
             WINDOWPLACEMENT, WM_CHAR, WM_COMMAND, WM_DESTROY, WM_DROPFILES, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+            WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
             WM_RBUTTONDOWN, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     },
@@ -86,6 +91,8 @@ const IDM_FILE_PROPS: u16 = 1009;
 const IDM_FILE_EXIT: u16 = 1010;
 
 const IDM_EDIT_ADD_TEXT: u16 = 2001;
+const IDM_EDIT_UNDO: u16 = 2098;
+const IDM_EDIT_REDO: u16 = 2099;
 const IDM_EDIT_WM_CONFIDENTIAL: u16 = 2002;
 const IDM_EDIT_WM_SAMPLE: u16 = 2003;
 const IDM_EDIT_WM_CUSTOM: u16 = 2004;
@@ -121,6 +128,7 @@ const IDM_CONV_TO_HTML: u16 = 4003;
 const IDM_CONV_TO_RTF: u16 = 4004;
 const IDM_CONV_TO_CSV: u16 = 4005;
 const IDM_CONV_BATCH_TXT: u16 = 4006;
+const IDM_CONV_TO_DOCX: u16 = 4007;
 
 const IDM_VIEW_ZOOM_IN: u16 = 5001;
 const IDM_VIEW_ZOOM_OUT: u16 = 5002;
@@ -146,6 +154,8 @@ const IDM_ORG_EXTRACT_PAGE: u16 = 6004;
 const IDM_ORG_SPLIT_PDF: u16 = 6005;
 const IDM_ORG_CROP_MARGIN: u16 = 6006;
 const IDM_ORG_ROTATE_PAGE_OBJ: u16 = 6007;
+const IDM_ORG_EXTRACT_RANGE: u16 = 6010;
+const IDM_ORG_REORDER: u16 = 6011;
 
 const IDM_TOOL_SEARCH: u16 = 7001;
 const IDM_TOOL_GOTO: u16 = 7002;
@@ -582,6 +592,7 @@ enum InputMode {
     SearchRedactPrompt,
     EditFormField(usize),
     CreateSealPrompt,
+    PageOperation(u16),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -630,7 +641,7 @@ enum OverlayKind {
     SignatureImage(usize),
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct UserOverlay {
     page_index: i32,
     kind: OverlayKind,
@@ -672,6 +683,12 @@ const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
 ];
 
 struct AppState {
+    status_controls: Vec<StatusControl>,
+    status_info_rect: RECT,
+    statusbar_height: i32,
+    history: history::EditHistory,
+    toolbar_rects: Vec<RECT>,
+    toolbar_height: i32,
     doc: *mut c_void,
     pdf_bytes: Vec<u8>,
     current_path: Option<String>,
@@ -752,6 +769,12 @@ impl AppState {
         wp.length = size_of::<WINDOWPLACEMENT>() as u32;
 
         Self {
+            status_controls: Vec::new(),
+            status_info_rect: unsafe { zeroed() },
+            statusbar_height: STATUSBAR_HEIGHT,
+            history: history::EditHistory::default(),
+            toolbar_rects: Vec::new(),
+            toolbar_height: TOOLBAR_HEIGHT,
             doc: null_mut(),
             pdf_bytes: Vec::new(),
             current_path: None,
@@ -824,11 +847,11 @@ impl AppState {
     }
 
     fn top_bar_offset(&self) -> i32 {
-        if self.is_fullscreen { 0 } else { TOOLBAR_HEIGHT }
+        if self.is_fullscreen { 0 } else { self.toolbar_height }
     }
 
     fn bottom_bar_offset(&self) -> i32 {
-        if self.is_fullscreen { 0 } else { STATUSBAR_HEIGHT }
+        if self.is_fullscreen { 0 } else { self.statusbar_height }
     }
 
     fn hit_test_page_area(&self, client_x: i32, client_y: i32) -> Option<(i32, i32, i32, i32, i32)> {
@@ -1083,6 +1106,7 @@ impl AppState {
                 FPDF_CloseDocument(self.doc);
             }
             self.doc = new_doc;
+            self.history = history::EditHistory::default();
             self.pdf_bytes.clear();
             self.current_path = None;
             self.file_name = String::from("제목 없음-1.pdf");
@@ -1152,21 +1176,27 @@ impl AppState {
             return Err("열려 있는 문서가 없습니다.".to_string());
         }
         unsafe {
+            // Save a separate document so retries cannot duplicate annotations or
+            // mutate the editable in-memory document on an I/O failure.
+            let document_bytes = annotations::serialize_document(self.doc, None)?;
+            let copy = annotations::PdfDocument::from_bytes(&document_bytes)?;
+            annotations::write_overlays(copy.0, &self.overlays)?;
             let mut ctx = FileWriteContext {
                 fw: FPDF_FILEWRITE { version: 1, WriteBlock: Some(write_block_cb) },
                 buf: Vec::new(),
             };
             let ok = if let Some(ver) = version {
-                FPDF_SaveWithVersion(self.doc, &mut ctx.fw, 0, ver)
+                FPDF_SaveWithVersion(copy.0, &mut ctx.fw, 0, ver)
             } else {
-                FPDF_SaveAsCopy(self.doc, &mut ctx.fw, 0)
+                FPDF_SaveAsCopy(copy.0, &mut ctx.fw, 0)
             };
             if ok == 0 || ctx.buf.is_empty() {
                 return Err("PDFium 문서 저장 실패".to_string());
             }
-            fs::write(path, &ctx.buf).map_err(|e| e.to_string())?;
+            annotations::atomic_write(Path::new(path), &ctx.buf)?;
             self.current_path = Some(path.to_string());
             self.file_name = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path).to_string();
+            self.mark_saved()?;
             Ok(())
         }
     }
@@ -1210,6 +1240,9 @@ impl AppState {
         self.thumb_scroll = 0;
         self.file_name = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string();
         self.load_bookmarks();
+        self.overlays = unsafe { annotations::take_managed_overlays(self.doc) };
+        self.history = history::EditHistory::default();
+        self.mark_saved()?;
         Ok(())
     }
 
@@ -1245,6 +1278,7 @@ impl AppState {
                 FPDF_ClosePage(new_page);
                 self.page_count = FPDF_GetPageCount(self.doc);
                 self.current_page = insert_idx;
+                for overlay in &mut self.overlays { if overlay.page_index >= insert_idx { overlay.page_index += 1; } }
                 self.clear_thumbnail_cache();
                 self.status_msg = Some(format!("{}페이지에 빈 페이지 삽입 완료", insert_idx + 1));
                 self.refresh_view(hwnd, true);
@@ -1260,6 +1294,8 @@ impl AppState {
         }
         unsafe {
             FPDFPage_Delete(self.doc, self.current_page);
+            self.overlays.retain(|o|o.page_index!=self.current_page);
+            for overlay in &mut self.overlays { if overlay.page_index>self.current_page { overlay.page_index-=1; } }
             self.page_count = FPDF_GetPageCount(self.doc);
             if self.current_page >= self.page_count {
                 self.current_page = (self.page_count - 1).max(0);
@@ -1284,9 +1320,12 @@ impl AppState {
                 return;
             }
             let insert_idx = if at_end { self.page_count } else { (self.current_page + 1).min(self.page_count) };
+            let added = FPDF_GetPageCount(src_doc);
             let ok = FPDF_ImportPages(self.doc, src_doc, null(), insert_idx);
             FPDF_CloseDocument(src_doc);
             if ok != 0 {
+                for overlay in &mut self.overlays { if overlay.page_index>=insert_idx { overlay.page_index+=added; } }
+                self.overlays.extend(annotations::take_managed_overlays(self.doc));
                 self.page_count = FPDF_GetPageCount(self.doc);
                 self.clear_thumbnail_cache();
                 self.status_msg = Some(format!("PDF 병합/삽입 완료! (총 {}페이지)", self.page_count));
@@ -2052,6 +2091,7 @@ impl AppState {
     }
 
     fn refresh_view(&mut self, hwnd: HWND, force_rerender: bool) {
+        unsafe { self.update_toolbar_layout(hwnd); }
         if force_rerender {
             self.pixels.clear();
         }
@@ -2562,22 +2602,116 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     SelectObject(hdc, old_font);
 }
 
-fn hit_test_toolbar(click_x: i32, click_y: i32) -> Option<u16> {
-    if !(4..=TOOLBAR_HEIGHT - 4).contains(&click_y) {
-        return None;
-    }
-    let mut cur_x = 6;
-    for btn in TOOLBAR_BUTTONS {
-        if click_x >= cur_x && click_x <= cur_x + btn.width {
-            return Some(btn.id);
+// Measure with the same font used to paint; one layout drives both drawing and clicks.
+unsafe fn toolbar_layout(hdc: *mut c_void, client_w: i32, dpi: u32) -> (Vec<RECT>, i32) {
+    let scale = |value: i32| ((value as i64 * dpi.max(96) as i64 + 48) / 96) as i32;
+    let margin = scale(6);
+    let gap = scale(6);
+    let padding = scale(10);
+    let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+    let sizes: Vec<SIZE> = TOOLBAR_BUTTONS.iter().map(|button| {
+        let text: Vec<u16> = button.label.encode_utf16().collect();
+        let mut size: SIZE = zeroed();
+        GetTextExtentPoint32W(hdc, text.as_ptr(), text.len() as i32, &mut size);
+        size
+    }).collect();
+    SelectObject(hdc, old_font);
+    let vertical_margin = scale(1);
+    let height = sizes.iter().map(|s| s.cy + scale(2)).max().unwrap_or(scale(18));
+    let (mut x, mut y) = (margin, vertical_margin);
+    let mut rects = Vec::new();
+    for (button, size) in TOOLBAR_BUTTONS.iter().zip(sizes) {
+        let width = scale(button.width).max(size.cx + padding * 2);
+        if x > margin && x + width > client_w - margin {
+            x = margin;
+            y += height + scale(2);
         }
-        cur_x += btn.width + 4;
+        rects.push(RECT { left: x, top: y, right: x + width, bottom: y + height });
+        x += width + gap;
     }
-    None
+    (rects, y + height + vertical_margin)
+}
+
+struct StatusControl { id: u16, label: String, rect: RECT }
+
+unsafe fn status_layout(hdc: *mut c_void, client_w: i32, dpi: u32, state: &AppState) -> (Vec<StatusControl>, RECT, i32) {
+    let scale = |value: i32| ((value as i64 * dpi.max(96) as i64 + 48) / 96) as i32;
+    let margin = scale(6);
+    let gap = scale(4);
+    let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+    let labels = [
+        (IDM_TB_FIRST_PAGE,"⏮".to_string()), (IDM_TB_PREV_PAGE,"◀".to_string()),
+        (IDM_TOOL_GOTO,format!("{} / {} p (이동)",state.current_page+1,state.page_count.max(1))),
+        (IDM_TB_NEXT_PAGE,"▶".to_string()), (IDM_TB_LAST_PAGE,"⏭".to_string()),
+        (IDM_VIEW_SPREAD,if state.spread_mode {"2p양면"} else {"1p단면"}.to_string()),
+        (IDM_VIEW_ZOOM_OUT,"−".to_string()), (IDM_VIEW_ACTUAL_SIZE,format!("{:.0}%",state.zoom*100.0)),
+        (IDM_VIEW_ZOOM_IN,"+".to_string()), (IDM_VIEW_FULLSCREEN,"⛶ 전체화면".to_string())
+    ];
+    let mut sizes = Vec::new();
+    for (_,label) in &labels {
+        let text:Vec<u16> = label.encode_utf16().collect(); let mut size:SIZE = zeroed();
+        GetTextExtentPoint32W(hdc,text.as_ptr(),text.len() as i32,&mut size); sizes.push(size);
+    }
+    let sample:Vec<u16> = "📐 문서 대기 중 🔗 🌐 💡".encode_utf16().collect();
+    let mut sample_size:SIZE = zeroed();
+    GetTextExtentPoint32W(hdc,sample.as_ptr(),sample.len() as i32,&mut sample_size);
+    SelectObject(hdc,old_font);
+    let row_height = sizes.iter().map(|s|s.cy).max().unwrap_or(0).max(sample_size.cy) + scale(6);
+    let widths:Vec<_> = sizes.iter().map(|s|s.cx+scale(10)).collect();
+    let nav_width = widths[..5].iter().sum::<i32>()+4*gap;
+    let right_width = widths[5..].iter().sum::<i32>()+4*gap;
+    let mut controls = Vec::new();
+    let mut info = RECT {left:margin,top:0,right:(client_w-margin).max(margin),bottom:row_height};
+    let mut height = row_height;
+    if nav_width + right_width + scale(100) + 2*gap + 2*margin <= client_w {
+        let right_x = client_w-margin-right_width;
+        let nav_x = ((client_w-nav_width)/2).min(right_x-gap-nav_width);
+        info.right = nav_x-gap;
+        let mut x=nav_x;
+        for (index,((id,label),width)) in labels.iter().zip(&widths).enumerate() {
+            if index==5 {x=right_x;}
+            controls.push(StatusControl {id:*id,label:label.clone(),rect:RECT{left:x,top:0,right:x+width,bottom:row_height}});
+            x+=width+gap;
+        }
+    } else {
+        // Narrow windows keep the message on its own line and wrap controls intact.
+        let mut x=margin;let mut y=row_height;
+        for ((id,label),width) in labels.iter().zip(&widths) {
+            if x>margin && x+width>client_w-margin {x=margin;y+=row_height;}
+            controls.push(StatusControl{id:*id,label:label.clone(),rect:RECT{left:x,top:y,right:x+width,bottom:y+row_height}});
+            x+=width+gap;
+        }
+        height=controls.last().map_or(row_height,|c|c.rect.bottom);
+    }
+    (controls,info,height)
+}
+
+impl AppState {
+    unsafe fn update_toolbar_layout(&mut self, hwnd: HWND) {
+        let mut rc: RECT = zeroed();
+        GetClientRect(hwnd, &mut rc);
+        let hdc = GetDC(hwnd);
+        if !hdc.is_null() {
+            let (rects, height) = toolbar_layout(hdc, rc.right, GetDpiForWindow(hwnd));
+            let (controls,info,status_height) = status_layout(hdc,rc.right,GetDpiForWindow(hwnd),self);
+            ReleaseDC(hwnd, hdc);
+            if self.toolbar_height != height || self.statusbar_height != status_height { self.pixels.clear(); }
+            self.toolbar_rects = rects;
+            self.toolbar_height = height;
+            self.status_controls=controls;self.status_info_rect=info;self.statusbar_height=status_height;
+        }
+    }
+}
+
+fn hit_test_toolbar(state: &AppState, click_x: i32, click_y: i32) -> Option<u16> {
+    state.toolbar_rects.iter().zip(TOOLBAR_BUTTONS).find_map(|(rect, button)| {
+        (click_x >= rect.left && click_x < rect.right && click_y >= rect.top && click_y < rect.bottom)
+            .then_some(button.id)
+    })
 }
 
 unsafe fn draw_top_toolbar(hdc: *mut c_void, client_w: i32, state: &AppState) {
-    let bar_rc = RECT { left: 0, top: 0, right: client_w, bottom: TOOLBAR_HEIGHT };
+    let bar_rc = RECT { left: 0, top: 0, right: client_w, bottom: state.toolbar_height };
     let bar_brush = CreateSolidBrush(0x002D2D30);
     FillRect(hdc, &bar_rc, bar_brush);
     DeleteObject(bar_brush as _);
@@ -2586,41 +2720,33 @@ unsafe fn draw_top_toolbar(hdc: *mut c_void, client_w: i32, state: &AppState) {
     let old_font = SelectObject(hdc, font);
     SetBkMode(hdc, TRANSPARENT as i32);
 
-    let mut cur_x = 6;
-    for btn in TOOLBAR_BUTTONS {
+    for (btn, btn_rc) in TOOLBAR_BUTTONS.iter().zip(&state.toolbar_rects) {
         let is_active = state.is_toolbar_btn_active(btn.id);
         let is_hover = state.hover_tb_id == Some(btn.id);
-        let btn_rc = RECT { left: cur_x, top: 5, right: cur_x + btn.width, bottom: TOOLBAR_HEIGHT - 6 };
         let bg_col = if is_active { 0x007A4B16 } else if is_hover { 0x00505055 } else { 0x003C3C40 };
         let btn_brush = CreateSolidBrush(bg_col);
-        FillRect(hdc, &btn_rc, btn_brush);
+        FillRect(hdc, btn_rc, btn_brush);
         DeleteObject(btn_brush as _);
 
         SetTextColor(hdc, if is_active { 0x0066EAFF } else { 0x00F0F0F0 });
         let w_lbl: Vec<u16> = btn.label.encode_utf16().collect();
-        TextOutW(hdc, cur_x + 5, 11, w_lbl.as_ptr(), w_lbl.len() as i32);
-        cur_x += btn.width + 4;
+        let mut size: SIZE = zeroed();
+        GetTextExtentPoint32W(hdc, w_lbl.as_ptr(), w_lbl.len() as i32, &mut size);
+        TextOutW(hdc, btn_rc.left + (btn_rc.right - btn_rc.left - size.cx) / 2,
+            btn_rc.top + (btn_rc.bottom - btn_rc.top - size.cy) / 2, w_lbl.as_ptr(), w_lbl.len() as i32);
     }
     SelectObject(hdc, old_font);
 }
 
-fn hit_test_status_bar(click_x: i32, client_w: i32) -> Option<u16> {
-    let center_x = client_w / 2;
-    if (center_x - 135..center_x - 100).contains(&click_x) { return Some(IDM_TB_FIRST_PAGE); }
-    if (center_x - 96..center_x - 60).contains(&click_x) { return Some(IDM_TB_PREV_PAGE); }
-    if (center_x - 56..center_x + 56).contains(&click_x) { return Some(IDM_TOOL_GOTO); }
-    if (center_x + 60..center_x + 96).contains(&click_x) { return Some(IDM_TB_NEXT_PAGE); }
-    if (center_x + 100..center_x + 135).contains(&click_x) { return Some(IDM_TB_LAST_PAGE); }
-    if (client_w - 295..client_w - 220).contains(&click_x) { return Some(IDM_VIEW_SPREAD); }
-    if (client_w - 210..client_w - 180).contains(&click_x) { return Some(IDM_VIEW_ZOOM_OUT); }
-    if (client_w - 178..client_w - 122).contains(&click_x) { return Some(IDM_VIEW_ACTUAL_SIZE); }
-    if (client_w - 120..client_w - 90).contains(&click_x) { return Some(IDM_VIEW_ZOOM_IN); }
-    if (client_w - 84..client_w - 8).contains(&click_x) { return Some(IDM_VIEW_FULLSCREEN); }
-    None
+fn hit_test_status_bar(state: &AppState, click_x: i32, click_y: i32) -> Option<u16> {
+    state.status_controls.iter().find_map(|control| {
+        let r=&control.rect;
+        (click_x>=r.left && click_x<r.right && click_y>=r.top && click_y<r.bottom).then_some(control.id)
+    })
 }
 
 unsafe fn draw_bottom_status_bar(hdc: *mut c_void, client_w: i32, client_h: i32, state: &AppState) {
-    let top_y = client_h - STATUSBAR_HEIGHT;
+    let top_y = client_h - state.statusbar_height;
     let bar_rc = RECT { left: 0, top: top_y, right: client_w, bottom: client_h };
     let bar_brush = CreateSolidBrush(0x00222225);
     FillRect(hdc, &bar_rc, bar_brush);
@@ -2653,18 +2779,17 @@ unsafe fn draw_bottom_status_bar(hdc: *mut c_void, client_w: i32, client_h: i32,
 
     SetTextColor(hdc, 0x00CCCCCC);
     let w_left: Vec<u16> = status_info.encode_utf16().collect();
-    TextOutW(hdc, 10, top_y + 6, w_left.as_ptr(), w_left.len() as i32);
-
-    let center_x = client_w / 2;
-    SetTextColor(hdc, 0x0080D8FF);
-    let nav_str = format!("[⏮]   [◀]    {} / {} p (이동)    [▶]   [⏭]", state.current_page + 1, state.page_count.max(1));
-    let w_nav: Vec<u16> = nav_str.encode_utf16().collect();
-    TextOutW(hdc, center_x - 122, top_y + 6, w_nav.as_ptr(), w_nav.len() as i32);
-
-    SetTextColor(hdc, 0x00E6E6E6);
-    let right_str = format!("[{}]  |  [-] {:>4.0}% [+]  |  [⛶ 전체화면]", if state.spread_mode { "2p양면" } else { "1p단면" }, state.zoom * 100.0);
-    let w_right: Vec<u16> = right_str.encode_utf16().collect();
-    TextOutW(hdc, client_w - 288, top_y + 6, w_right.as_ptr(), w_right.len() as i32);
+    let mut info=state.status_info_rect;
+    info.top+=top_y;info.bottom+=top_y;
+    // A bounded, vertically centered line prevents both clipping and overlap.
+    DrawTextW(hdc,w_left.as_ptr(),w_left.len() as i32,&mut info,0x20|0x4|0x8000|0x800);
+    for (index,control) in state.status_controls.iter().enumerate() {
+        SetTextColor(hdc,if index<5 {0x0080D8FF} else {0x00E6E6E6});
+        let text:Vec<u16>=control.label.encode_utf16().collect();let mut size:SIZE=zeroed();
+        GetTextExtentPoint32W(hdc,text.as_ptr(),text.len() as i32,&mut size);
+        let r=&control.rect;
+        TextOutW(hdc,r.left+(r.right-r.left-size.cx)/2,top_y+r.top+(r.bottom-r.top-size.cy)/2,text.as_ptr(),text.len() as i32);
+    }
 
     SelectObject(hdc, old_font);
 }
@@ -2896,6 +3021,9 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_sub(hmenu, m_file, "파일(&F)");
 
     let m_edit = CreatePopupMenu();
+    add_item(m_edit, IDM_EDIT_UNDO, "실행 취소\tCtrl+Z");
+    add_item(m_edit, IDM_EDIT_REDO, "다시 실행\tCtrl+Y");
+    add_sep(m_edit);
     add_item(m_edit, IDM_EDIT_ADD_TEXT, "텍스트 추가(&T)...");
     add_sep(m_edit);
     add_item(m_edit, IDM_EDIT_WM_CONFIDENTIAL, "워터마크 추가: 'CONFIDENTIAL'");
@@ -2929,6 +3057,7 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_conv, IDM_CONV_TO_TXT, "텍스트로 변환 (.txt)...");
     add_item(m_conv, IDM_CONV_TO_HTML, "HTML 웹 문서로 변환 (.html)...");
     add_item(m_conv, IDM_CONV_TO_RTF, "Word 호환 문서로 변환 (.rtf)...");
+    add_item(m_conv, IDM_CONV_TO_DOCX, "Word 문서 (.docx, 텍스트 중심·스캔 페이지 OCR)...");
     add_item(m_conv, IDM_CONV_TO_CSV, "Excel 호환 데이터로 변환 (.csv)...");
     add_sub(hmenu, m_conv, "변환(&C)");
 
@@ -2950,11 +3079,15 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_org, IDM_ORG_INSERT_PDF, "다른 PDF에서 페이지 삽입(&I)...");
     add_item(m_org, IDM_ORG_DELETE_PAGE, "현재 페이지 삭제(&D)");
     add_item(m_org, IDM_ORG_EXTRACT_PAGE, "현재 페이지 추출 저장(&E)...");
+    add_item(m_org, IDM_ORG_EXTRACT_RANGE, "페이지 범위 추출 (예: 1-3,5)...");
+    add_item(m_org, IDM_ORG_SPLIT_PDF, "선택 범위를 한 페이지씩 분할 저장...");
+    add_item(m_org, IDM_ORG_REORDER, "전체 페이지 순서 변경 (예: 3,1,2)...");
     add_item(m_org, IDM_ORG_CROP_MARGIN, "페이지 여백 자르기 (CropBox)");
     add_sub(hmenu, m_org, "구성(&P)");
 
     let m_tool = CreatePopupMenu();
     add_item(m_tool, IDM_TOOL_SEARCH, "문서 전체 키워드 검색(&F)...\tF");
+    add_item(m_tool, IDM_TOOL_OCR_EXTRACT, "현재 페이지 OCR → 텍스트 저장...");
     add_item(m_tool, IDM_TOOL_GOTO, "페이지 번호 직접 이동(&G)...\tG");
     add_item(m_tool, IDM_TOOL_MERGE_PDF, "PDF 병합...");
     add_item(m_tool, IDM_TOOL_COMPARE_PDF, "PDF 비교 (VS)...");
@@ -3003,6 +3136,8 @@ fn update_window_title(hwnd: HWND, state: &AppState) {
         );
         match state.input_mode {
             InputMode::GotoPage => format!("{} | 📄 페이지 이동 (1~{}): {}_ [Enter:이동]", base, state.page_count, state.goto_input),
+            InputMode::PageOperation(action) => format!("{} | {}: {}_ [Enter:적용, ESC:취소]",base,
+                if action==IDM_ORG_REORDER {"전체 페이지 순서 (예: 3,1,2)"} else {"페이지 범위 (예: 1-3,5)"},state.goto_input),
             InputMode::AddTextPrompt => format!("{} | ✏️ 추가할 텍스트 입력: \"{}_\" [Enter:삽입]", base, state.text_prompt_buf),
             InputMode::CustomWatermarkPrompt => format!("{} | 💧 워터마크 입력: \"{}_\" [Enter:적용]", base, state.text_prompt_buf),
             InputMode::CreateSealPrompt => format!("{} | 💮 도장/인장에 새길 이름 입력: \"{}_\" [Enter:생성, ESC:취소]", base, state.text_prompt_buf),
@@ -3023,6 +3158,7 @@ fn update_window_title(hwnd: HWND, state: &AppState) {
     } else {
         format!("DaPDF(v{}) - {}", APP_VERSION, state.file_name)
     };
+    let title = if state.has_unsaved_changes() { format!("* {}",title) } else { title };
     let w_title = to_wstring(&title);
     unsafe { SetWindowTextW(hwnd, w_title.as_ptr()) };
 }
@@ -3143,7 +3279,23 @@ unsafe fn copy_current_view_bitmap_to_clipboard(hwnd: HWND, state: &AppState) ->
 }
 
 unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
+    if matches!(cmd_id, IDM_FILE_NEW_BLANK | IDM_FILE_FROM_CLIPBOARD | IDM_FILE_OPEN) && !state.confirm_unsaved(hwnd) { return; }
+    let native_edit = matches!(cmd_id, IDM_ORG_INSERT_BLANK | IDM_ORG_INSERT_PDF | IDM_ORG_DELETE_PAGE |
+        IDM_ORG_CROP_MARGIN | IDM_TOOL_MERGE_PDF | IDM_TOOL_FLATTEN);
+    let overlay_edit = matches!(cmd_id, IDM_ANNOT_CLEAR_ALL | IDM_SEC_SEARCH_REDACT | IDM_FORM_RESET_DATA |
+        IDM_FORM_IMPORT_FDF | IDM_EDIT_WM_CONFIDENTIAL | IDM_EDIT_WM_CLEAR | IDM_EDIT_BG_CREAM | IDM_EDIT_BG_CLEAR);
+    if native_edit || overlay_edit {
+        if !state.record_edit() { return; }
+        if native_edit { state.history.native_cache = None; }
+    }
     match cmd_id {
+        IDM_TOOL_OCR_EXTRACT => { if !state.doc.is_null() {state.export_ocr(hwnd);} }
+        IDM_CONV_TO_DOCX => { if !state.doc.is_null() {state.export_docx(hwnd);} }
+        IDM_ORG_EXTRACT_RANGE | IDM_ORG_SPLIT_PDF | IDM_ORG_REORDER => {
+            if !state.doc.is_null() { state.goto_input.clear(); state.input_mode=InputMode::PageOperation(cmd_id); state.refresh_view(hwnd,false); }
+        }
+        IDM_EDIT_UNDO => { state.undo_redo(false); state.refresh_view(hwnd,true); }
+        IDM_EDIT_REDO => { state.undo_redo(true); state.refresh_view(hwnd,true); }
         IDM_TB_PREV_PAGE => state.change_page(-1, hwnd),
         IDM_TB_NEXT_PAGE => state.change_page(1, hwnd),
         IDM_TB_FIRST_PAGE => state.go_to_first_page(hwnd),
@@ -3187,18 +3339,29 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
             }
         }
         IDM_FILE_PRINT => {
+            if state.doc.is_null() { return; }
             let mut pd: PRINTDLGW = zeroed();
             pd.lStructSize = size_of::<PRINTDLGW>() as u32;
             pd.hwndOwner = hwnd;
-            pd.Flags = PD_RETURNDC;
+            pd.Flags = PD_RETURNDC | 0x40000 | 0x4; // driver copies/collation; no text selection
+            pd.nMinPage = 1;
+            pd.nMaxPage = state.page_count.min(u16::MAX as i32) as u16;
+            pd.nFromPage = 1;
+            pd.nToPage = pd.nMaxPage;
+            pd.nCopies = 1;
             if PrintDlgW(&mut pd) != 0 && !pd.hDC.is_null() {
+                let first = if pd.Flags & 2 != 0 { pd.nFromPage as i32 - 1 } else { 0 };
+                let last = if pd.Flags & 2 != 0 { pd.nToPage as i32 - 1 } else { state.page_count - 1 };
+                let result = printing::print_document(state, pd.hDC, first, last, None);
                 DeleteDC(pd.hDC);
-                state.status_msg = Some("인쇄 설정을 닫았습니다. 실제 인쇄 전송은 아직 지원하지 않습니다.".to_string());
+                state.status_msg = Some(match result { Ok(()) => "인쇄 작업을 프린터에 전송했습니다".into(), Err(err) => format!("인쇄 실패: {}",err) });
                 state.refresh_view(hwnd, false);
             }
+            if !pd.hDevMode.is_null() { GlobalFree(pd.hDevMode); }
+            if !pd.hDevNames.is_null() { GlobalFree(pd.hDevNames); }
         }
         IDM_FILE_PROPS => state.show_metadata_dialog(hwnd),
-        IDM_FILE_EXIT => PostQuitMessage(0),
+        IDM_FILE_EXIT => { if state.confirm_unsaved(hwnd) { PostQuitMessage(0); } }
 
         IDM_EDIT_ADD_TEXT => {
             if state.doc.is_null() { state.create_blank_pdf(hwnd); }
@@ -3456,6 +3619,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_SIZE => {
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
+                state.update_toolbar_layout(hwnd);
                 let width = (lparam & 0xFFFF) as i16 as i32;
                 let height = ((lparam >> 16) & 0xFFFF) as i16 as i32;
                 state.pixels.clear();
@@ -3473,7 +3637,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 if DragQueryFileW(hdrop, 0, buf.as_mut_ptr(), buf.len() as u32) > 0 {
                     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
                     let path = String::from_utf16_lossy(&buf[..len]);
-                    if state.load_file(&path).is_ok() {
+                    if state.confirm_unsaved(hwnd) && state.load_file(&path).is_ok() {
                         state.refresh_view(hwnd, true);
                     }
                 }
@@ -3543,17 +3707,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
                 let mut rc: RECT = zeroed();
                 GetClientRect(hwnd, &mut rc);
-                let client_w = rc.right - rc.left;
                 let client_h = rc.bottom - rc.top;
 
-                if !state.is_fullscreen && click_y < TOOLBAR_HEIGHT {
-                    if let Some(cmd_id) = hit_test_toolbar(click_x, click_y) {
+                if !state.is_fullscreen && click_y < state.toolbar_height {
+                    if let Some(cmd_id) = hit_test_toolbar(state, click_x, click_y) {
                         handle_menu_command(hwnd, cmd_id, state);
                     }
                     return 0;
                 }
-                if !state.is_fullscreen && click_y >= client_h - STATUSBAR_HEIGHT {
-                    if let Some(cmd_id) = hit_test_status_bar(click_x, client_w) {
+                if !state.is_fullscreen && click_y >= client_h - state.statusbar_height {
+                    if let Some(cmd_id) = hit_test_status_bar(state,click_x,click_y-(client_h-state.statusbar_height)) {
                         handle_menu_command(hwnd, cmd_id, state);
                     }
                     return 0;
@@ -3597,6 +3760,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     return 0;
                 }
 
+                if state.active_tool != ActiveTool::TextSelect && !state.record_edit() { return 0; }
                 if state.active_tool == ActiveTool::TextSelect {
                     if let Some((page_idx, char_idx)) = state.get_char_index_at_client_pos(click_x, click_y) {
                         state.text_selection = state.build_text_selection(page_idx, char_idx, char_idx);
@@ -3732,11 +3896,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
                 if !state.is_dragging {
                     if !state.is_fullscreen {
-                        let new_hover = if cur_y < TOOLBAR_HEIGHT { hit_test_toolbar(cur_x, cur_y) } else { None };
+                        let new_hover = if cur_y < state.toolbar_height { hit_test_toolbar(state, cur_x, cur_y) } else { None };
                         if new_hover != state.hover_tb_id {
                             state.hover_tb_id = new_hover;
-                            let tb_rc = RECT { left: 0, top: 0, right: 2000, bottom: TOOLBAR_HEIGHT };
-                            InvalidateRect(hwnd, &tb_rc, 0);
+                            InvalidateRect(hwnd, null(), 0);
                         }
                     }
                     let new_link = if state.active_tool == ActiveTool::Pan && cur_x >= state.sidebar_offset() {
@@ -3950,6 +4113,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_CHAR => {
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
+                if matches!(state.input_mode,InputMode::EditFormField(_)) && !state.record_edit() { return 0; }
                 if state.ignore_next_char {
                     state.ignore_next_char = false;
                     return 0;
@@ -3984,9 +4148,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             }
                         }
                     }
-                    InputMode::GotoPage => {
+                    InputMode::GotoPage | InputMode::PageOperation(_) => {
                         if let Some(c) = char::from_u32(ch) {
-                            if c.is_ascii_digit() {
+                            if c.is_ascii_digit() || (matches!(state.input_mode,InputMode::PageOperation(_)) && matches!(c,','|'-'|' ')) {
                                 state.goto_input.push(c);
                                 update_window_title(hwnd, state);
                             }
@@ -4001,6 +4165,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_KEYDOWN => {
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
+                if GetKeyState(VK_CONTROL as i32) < 0 {
+                    if wparam == 0x5a || wparam == 0x59 {
+                        state.undo_redo(wparam == 0x59);
+                        state.refresh_view(hwnd,true);
+                        return 0;
+                    }
+                    if wparam == 0x50 { handle_menu_command(hwnd,IDM_FILE_PRINT,state); return 0; }
+                }
                 let key = wparam as u16;
                 let shift_pressed = (GetKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
                 let ctrl_pressed = (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
@@ -4034,6 +4206,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             let mode = state.input_mode;
                             state.input_mode = InputMode::Normal;
                             match mode {
+                                InputMode::PageOperation(action) => {
+                                    let result=state.apply_page_operation(hwnd,action);
+                                    state.status_msg=Some(match result {Ok(())=>"페이지 작업 완료".into(),Err(err)=>err});
+                                }
                                 InputMode::GotoPage => {
                                     if let Ok(p) = state.goto_input.trim().parse::<i32>() {
                                         if p >= 1 && p <= state.page_count {
@@ -4043,6 +4219,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                     state.goto_input.clear();
                                 }
                                 InputMode::AddTextPrompt => {
+                                    if !state.record_edit() { return 0; }
+                                    state.history.native_cache = None;
                                     let txt = state.text_prompt_buf.trim().to_string();
                                     state.text_prompt_buf.clear();
                                     if !txt.is_empty() && !state.doc.is_null() {
@@ -4057,6 +4235,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                     }
                                 }
                                 InputMode::CustomWatermarkPrompt => {
+                                    if !state.record_edit() { return 0; }
                                     let wm = state.text_prompt_buf.trim().to_string();
                                     state.text_prompt_buf.clear();
                                     if !wm.is_empty() { state.watermark_text = Some(wm); }
@@ -4088,7 +4267,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         }
                         VK_BACK => {
                             match state.input_mode {
-                                InputMode::GotoPage => { state.goto_input.pop(); }
+                                InputMode::GotoPage | InputMode::PageOperation(_) => { state.goto_input.pop(); }
                                 InputMode::EditFormField(idx) => {
                                     if let Some(ov) = state.overlays.get_mut(idx) { ov.label.pop(); }
                                 }
@@ -4165,7 +4344,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         } else if state.is_fullscreen {
                             state.toggle_fullscreen(hwnd);
                         } else {
-                            PostQuitMessage(0);
+                            if state.confirm_unsaved(hwnd) { PostQuitMessage(0); }
                         }
                     }
                     _ => {}
@@ -4190,6 +4369,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
                 let bg_color = if state.dark_mode { 0x00141414 } else { state.theme_bg_color };
+                state.update_toolbar_layout(hwnd);
                 let bg_brush = CreateSolidBrush(bg_color);
                 FillRect(hdc, &rc, bg_brush);
                 DeleteObject(bg_brush as _);
@@ -4284,6 +4464,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             0
         }
 
+        WM_CLOSE => {
+            if state_ptr.is_null() || (&mut *state_ptr).confirm_unsaved(hwnd) {
+                DefWindowProcW(hwnd,msg,wparam,lparam)
+            } else { 0 }
+        }
         WM_DESTROY => {
             PostQuitMessage(0);
             0
@@ -4315,6 +4500,7 @@ fn main() {
         wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = Some(wnd_proc);
         wc.hInstance = hinstance;
+        wc.hIcon = LoadIconW(hinstance, 1usize as *const u16);
         wc.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
         wc.lpszClassName = class_name.as_ptr();
 

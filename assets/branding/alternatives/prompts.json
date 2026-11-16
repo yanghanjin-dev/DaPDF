@@ -1,0 +1,75 @@
+{
+  "tool": "built-in image_gen",
+  "icons": [
+    {
+      "number": "01",
+      "name": "펼친 책",
+      "file": "dapdf-01-open-book.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-a7cefb8a-8154-4dbf-9931-2e9375ce3fb3.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. A bold open book with two broad white pages, one red folded corner, softly squared geometric silhouette, red/coral rounded-square tile. A clean small DaPDF wordmark below the book. Calm, approachable and balanced."
+    },
+    {
+      "number": "02",
+      "name": "D 모노그램",
+      "file": "dapdf-02-d-monogram.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-9483e80b-f7d8-4051-88f4-35557683776e.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. A striking custom capital D monogram formed from a white folded document outline and one blue page layer, coral red tile. The D is the dominant mark, with a short DaPDF wordmark below. Strong minimal typographic identity."
+    },
+    {
+      "number": "03",
+      "name": "문서 부채",
+      "file": "dapdf-03-page-fan.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-5c30222f-dd4f-45ac-9983-b759b36d8510.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. Three broad white document sheets opening like a fan, their top corners accented coral, blue and teal to represent multiple formats. Deep navy rounded-square tile. DaPDF wordmark in white below. Simple and friendly."
+    },
+    {
+      "number": "04",
+      "name": "변환 루프",
+      "file": "dapdf-04-conversion.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-c2bca8d3-340b-4bad-983f-4657bc37c26d.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. A white folded document at center with two broad opposing curved arrows surrounding it, coral red and cobalt blue, on a white rounded-square tile with a very subtle pale border. Dark navy DaPDF wordmark below. Arrows must read as conversion, never an eye."
+    },
+    {
+      "number": "05",
+      "name": "문서와 펜",
+      "file": "dapdf-05-editor.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-302f6c2e-c4a6-42ca-8517-84eccbfa0349.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. A white folded-corner document with two strong navy text lines and one broad diagonal coral pencil integrated into its lower-right edge. Cobalt blue rounded-square tile. White DaPDF wordmark below. Confident professional editing identity."
+    },
+    {
+      "number": "06",
+      "name": "모든 문서",
+      "file": "dapdf-06-all-pages.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-26147b08-916f-4879-8346-4bee839f8804.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. Four small folded-page silhouettes arranged in a compact 2x2 mosaic, white, coral, blue and teal on a deep navy rounded-square tile, enough gaps to remain readable. White DaPDF wordmark below. Communicate all documents in one workspace."
+    },
+    {
+      "number": "07",
+      "name": "무한 문서",
+      "file": "dapdf-07-infinity.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-d6a29211-7e19-454f-b30f-629139115874.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. An original broad white infinity ribbon made from two folded paper strips, on a coral red rounded-square tile, suggesting unlimited PDF possibilities. Avoid any pupil, lens, face or eye-shaped enclosure. DaPDF wordmark in white below. Bold and very simple."
+    },
+    {
+      "number": "08",
+      "name": "통합 폴더",
+      "file": "dapdf-08-folder.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-a9e43bdf-9fdd-4343-bb9d-0f3b0e2d4d4a.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. A bold white open document folder holding three short folded sheets with red, blue and teal tabs. Warm coral rounded-square tile. White DaPDF wordmark below. Organized all-in-one PDF workspace, minimal clean shapes."
+    },
+    {
+      "number": "09",
+      "name": "문서의 확장",
+      "file": "dapdf-09-paper-plane.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-597f7435-1cae-44d0-95d5-4f97d018d46d.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. A broad geometric folded paper airplane emerging from a white PDF page, integrated into a single clean mark, teal-to-cobalt restrained tile. White DaPDF wordmark below. Communicate easy document transformation and export. No thin motion trails."
+    },
+    {
+      "number": "10",
+      "name": "문서 창",
+      "file": "dapdf-10-window.png",
+      "source": "C:\\Users\\yahaj\\.codex\\generated_images\\01a1dfe8-313d-7830-a8db-ba9ad5480a64\\exec-89364577-5b6c-42c9-b93c-fae1a1b47f45.png",
+      "prompt": "Use case: logo-brand. Generate ONE distinct original Windows application icon for DaPDF, meaning view all PDFs, with future PDF-to-image, Word conversion and text editing. Square composition, transparent exterior margin around one rounded-square app tile, tile fills 86% of canvas. Premium flat geometric logo artwork, crisp bold shapes, balanced negative space, legible silhouette at 32px. Text must be exactly \"DaPDF\", no other words or numbers. No eyes, pupils, faces, human or animal features, anthropomorphism, uncanny organic forms, Adobe ribbon or copied third-party logos. No contact sheet, no mockup, no surrounding objects, no shadows outside tile, no fine details. A minimal white desktop document window containing one coral folded page with two bold navy text lines. One small blue corner overlaps like an additional format. Soft light ivory rounded-square tile, navy DaPDF wordmark below. Quiet professional productivity aesthetic."
+    }
+  ]
+}

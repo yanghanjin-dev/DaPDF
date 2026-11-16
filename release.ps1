@@ -1,4 +1,4 @@
-param([switch]$SkipTests)
+param([switch]$SkipTests, [switch]$SkipInstaller)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Push-Location $PSScriptRoot
@@ -14,13 +14,13 @@ try {
         cargo test --offline
         if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed.' }
     }
-    cargo build --release --offline
+    cargo build --release --offline --target-dir target/distribution
     if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
     $ReleaseDir = Join-Path $PSScriptRoot 'releases'
     $Stage = Join-Path $PSScriptRoot ('dist\v' + $VersionNum + '-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $Stage -Force | Out-Null
     New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
-    Copy-Item -LiteralPath 'target\release\dapdf.exe' -Destination (Join-Path $Stage 'DaPDF.exe')
+    Copy-Item -LiteralPath 'target\distribution\release\dapdf.exe' -Destination (Join-Path $Stage 'DaPDF.exe')
     Copy-Item -LiteralPath 'vendor\bin\pdfium.dll' -Destination $Stage
     Copy-Item -LiteralPath 'README.md','VERSION' -Destination $Stage
     Copy-Item -LiteralPath "releases\notes-v$VersionNum.md" -Destination (Join-Path $Stage 'RELEASE-NOTES.md')
@@ -34,6 +34,9 @@ try {
     Write-Host "Package: $ZipPath"
     Write-Host "SHA256: $Hash"
     Write-Host "Staging: $Stage"
+    if (-not $SkipInstaller) {
+        & (Join-Path $PSScriptRoot 'build-installer.ps1') -StageDir $Stage
+    }
 } finally {
     Pop-Location
 }
