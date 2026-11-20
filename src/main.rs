@@ -1,4 +1,4 @@
-﻿#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 #![allow(dead_code, non_snake_case, non_camel_case_types)]
 
 use std::collections::HashMap;
@@ -683,6 +683,10 @@ const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
 ];
 
 struct AppState {
+    sidebar_width: i32,
+    resizing_sidebar: bool,
+    search_caret_visible: bool,
+    window_focused: bool,
     status_controls: Vec<StatusControl>,
     status_info_rect: RECT,
     statusbar_height: i32,
@@ -769,6 +773,10 @@ impl AppState {
         wp.length = size_of::<WINDOWPLACEMENT>() as u32;
 
         Self {
+            sidebar_width: SIDEBAR_WIDTH,
+            resizing_sidebar: false,
+            search_caret_visible: true,
+            window_focused: true,
             status_controls: Vec::new(),
             status_info_rect: unsafe { zeroed() },
             statusbar_height: STATUSBAR_HEIGHT,
@@ -1859,7 +1867,7 @@ impl AppState {
     }
 
     fn sidebar_offset(&self) -> i32 {
-        if self.show_sidebar { SIDEBAR_WIDTH } else { 0 }
+        if self.show_sidebar { self.sidebar_width } else { 0 }
     }
 
     fn align_vertical_pan_if_needed(&mut self, viewport_h: i32) {
@@ -2525,12 +2533,15 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     let top_off = state.top_bar_offset();
     let bot_off = state.bottom_bar_offset();
     let panel_bottom = client_h - bot_off;
-    let panel_rc = RECT { left: 0, top: top_off, right: SIDEBAR_WIDTH, bottom: panel_bottom };
+    let panel_rc = RECT { left: 0, top: top_off, right: state.sidebar_width, bottom: panel_bottom };
     let panel_brush = CreateSolidBrush(0x00252526);
     FillRect(hdc, &panel_rc, panel_brush);
     DeleteObject(panel_brush as _);
+    let divider = RECT { left: state.sidebar_width - 3, top: top_off, right: state.sidebar_width, bottom: panel_bottom };
+    let divider_brush = CreateSolidBrush(0x00555555);
+    FillRect(hdc, &divider, divider_brush); DeleteObject(divider_brush as _);
 
-    let tab_bar_rc = RECT { left: 0, top: top_off, right: SIDEBAR_WIDTH, bottom: top_off + SIDEBAR_TAB_HEIGHT };
+    let tab_bar_rc = RECT { left: 0, top: top_off, right: state.sidebar_width, bottom: top_off + SIDEBAR_TAB_HEIGHT };
     let tab_bar_brush = CreateSolidBrush(0x001B1B1C);
     FillRect(hdc, &tab_bar_rc, tab_bar_brush);
     DeleteObject(tab_bar_brush as _);
@@ -2549,23 +2560,32 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
 
     SetTextColor(hdc, 0x00999999);
     let close_lbl: Vec<u16> = "✕".encode_utf16().collect();
-    TextOutW(hdc, 256, top_off + 10, close_lbl.as_ptr(), close_lbl.len() as i32);
+    TextOutW(hdc, state.sidebar_width - 24, top_off + 10, close_lbl.as_ptr(), close_lbl.len() as i32);
 
     let content_top = top_off + SIDEBAR_TAB_HEIGHT + 4;
     let avail_h = (panel_bottom - content_top).max(26);
 
     match state.sidebar_tab {
         SidebarTab::Search => {
-            let mut field = RECT { left: 12, top: content_top + 12, right: SIDEBAR_WIDTH - 12, bottom: content_top + 48 };
+            let mut field = RECT { left: 12, top: content_top + 12, right: state.sidebar_width - 12, bottom: content_top + 48 };
             let brush = CreateSolidBrush(if state.input_mode == InputMode::Search { 0x00505050 } else { 0x00383838 });
             FillRect(hdc, &field, brush);
             DeleteObject(brush as _);
             SetTextColor(hdc, 0x00EEEEEE);
-            let label = if state.search_query.is_empty() { "검색어 입력...".to_string() }
-                else { format!("{}{}", state.search_query, if state.input_mode == InputMode::Search { "_" } else { "" }) };
+            let focused = state.input_mode == InputMode::Search;
+            let label = if state.search_query.is_empty() && !focused { "검색어 입력...".to_string() }
+                else { state.search_query.clone() };
             let label: Vec<u16> = label.encode_utf16().collect();
             field.left += 8; field.right -= 8;
             DrawTextW(hdc, label.as_ptr(), label.len() as i32, &mut field, 0x20 | 0x4 | 0x8000);
+            if focused && state.window_focused && state.search_caret_visible {
+                let mut size: SIZE = zeroed();
+                GetTextExtentPoint32W(hdc, label.as_ptr(), label.len() as i32, &mut size);
+                let x = (field.left + size.cx).min(field.right - 2);
+                let caret = RECT { left: x, top: field.top + 7, right: x + 2, bottom: field.bottom - 7 };
+                let brush = CreateSolidBrush(0x00FFFFFF);
+                FillRect(hdc, &caret, brush); DeleteObject(brush as _);
+            }
             let labels = [
                 (12, content_top + 64, "◀ 이전     다음 ▶".to_string()),
                 (12, content_top + 108, if state.search_query.is_empty() { "문서 전체에서 검색합니다".into() }
@@ -2577,7 +2597,8 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
             for (x, y, label) in labels {
                 if y + 20 <= panel_bottom {
                     let text: Vec<u16> = label.encode_utf16().collect();
-                    TextOutW(hdc, x, y, text.as_ptr(), text.len() as i32);
+                    let mut bounds = RECT { left: x, top: y, right: state.sidebar_width - 12, bottom: y + 24 };
+                    DrawTextW(hdc, text.as_ptr(), text.len() as i32, &mut bounds, 0x20 | 0x8000);
                 }
             }
         }
@@ -2604,7 +2625,7 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
                 let item_top = content_top + (slot as i32) * THUMB_ITEM_HEIGHT + 4;
                 let is_active = p_idx == state.current_page;
                 if let Some(thumb) = state.get_or_render_thumbnail(p_idx) {
-                    let tx = 16 + ((SIDEBAR_WIDTH - 34) - thumb.width) / 2;
+                    let tx = 16 + ((state.sidebar_width - 34) - thumb.width) / 2;
                     let ty = item_top + 6 + (176 - thumb.height) / 2;
                     let mut bmi: BITMAPINFO = zeroed();
                     bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
@@ -2620,7 +2641,7 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
                 }
                 SetTextColor(hdc, if is_active { 0x0000EAFF } else { 0x00DDDDDD });
                 let w_p: Vec<u16> = format!("- {} -", p_idx + 1).encode_utf16().collect();
-                TextOutW(hdc, SIDEBAR_WIDTH / 2 - 20, item_top + THUMB_ITEM_HEIGHT - 28, w_p.as_ptr(), w_p.len() as i32);
+                TextOutW(hdc, state.sidebar_width / 2 - 20, item_top + THUMB_ITEM_HEIGHT - 28, w_p.as_ptr(), w_p.len() as i32);
             }
         }
     }
@@ -3613,12 +3634,43 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
 
     match msg {
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED => {
+            if !state_ptr.is_null() { (&mut *state_ptr).resizing_sidebar = false; }
+            0
+        }
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_SETFOCUS |
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_KILLFOCUS => {
+            if !state_ptr.is_null() {
+                let state = &mut *state_ptr;
+                state.window_focused = msg == windows_sys::Win32::UI::WindowsAndMessaging::WM_SETFOCUS;
+                state.search_caret_visible = true;
+                InvalidateRect(hwnd, null(), 0);
+            }
+            0
+        }
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER => {
+            if wparam == 1 && !state_ptr.is_null() {
+                let state = &mut *state_ptr;
+                if state.show_sidebar && state.sidebar_tab == SidebarTab::Search && state.input_mode == InputMode::Search {
+                    state.search_caret_visible = !state.search_caret_visible;
+                    let rect = RECT { left: 0, top: state.top_bar_offset(), right: state.sidebar_width, bottom: state.top_bar_offset() + SIDEBAR_TAB_HEIGHT + 56 };
+                    InvalidateRect(hwnd, &rect, 0);
+                }
+            }
+            0
+        }
         WM_ERASEBKGND => 1,
 
         WM_SETCURSOR => {
             if !state_ptr.is_null() {
                 let state = &*state_ptr;
                 if (lparam & 0xFFFF) as u16 == 1 {
+                    let mut point: POINT = zeroed();
+                    GetCursorPos(&mut point); ScreenToClient(hwnd, &mut point);
+                    if state.show_sidebar && !state.is_fullscreen && (point.x - state.sidebar_width).abs() <= 5 && point.y >= state.top_bar_offset() {
+                        SetCursor(LoadCursorW(null_mut(), windows_sys::Win32::UI::WindowsAndMessaging::IDC_SIZEWE));
+                        return 1;
+                    }
                     if state.hovered_link.is_some() {
                         SetCursor(LoadCursorW(null_mut(), IDC_HAND));
                         return 1;
@@ -3645,6 +3697,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 state.update_toolbar_layout(hwnd);
                 let width = (lparam & 0xFFFF) as i16 as i32;
                 let height = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+                state.sidebar_width = state.sidebar_width.min((width - 160).max(200));
                 state.pixels.clear();
                 state.render_current_page(width, height);
                 InvalidateRect(hwnd, null(), 0);
@@ -3731,6 +3784,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let mut rc: RECT = zeroed();
                 GetClientRect(hwnd, &mut rc);
                 let client_h = rc.bottom - rc.top;
+                if state.show_sidebar && !state.is_fullscreen && (click_x - state.sidebar_width).abs() <= 5
+                    && click_y >= state.top_bar_offset() && click_y < client_h - state.bottom_bar_offset() {
+                    state.resizing_sidebar = true;
+                    SetCapture(hwnd);
+                    return 0;
+                }
 
                 if !state.is_fullscreen && click_y < state.toolbar_height {
                     if let Some(cmd_id) = hit_test_toolbar(state, click_x, click_y) {
@@ -3746,9 +3805,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
 
                 let top_off = state.top_bar_offset();
-                if state.show_sidebar && click_x < SIDEBAR_WIDTH {
+                if state.show_sidebar && click_x < state.sidebar_width {
                     if click_y >= top_off && click_y < top_off + SIDEBAR_TAB_HEIGHT {
-                        if click_x >= 246 {
+                        if click_x >= state.sidebar_width - 34 {
                             state.show_sidebar = false;
                             if state.input_mode == InputMode::Search { state.input_mode = InputMode::Normal; }
                             state.refresh_view(hwnd, true);
@@ -3770,6 +3829,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                 let y = click_y - content_top;
                                 if (12..48).contains(&y) {
                                     state.input_mode = InputMode::Search;
+                                    state.search_caret_visible = true;
                                     state.refresh_view(hwnd, false);
                                 } else if (56..96).contains(&y) {
                                     state.step_search_match(click_x >= 100, hwnd);
@@ -3928,6 +3988,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let state = &mut *state_ptr;
                 let cur_x = (lparam & 0xFFFF) as i16 as i32;
                 let cur_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+                if state.resizing_sidebar {
+                    let mut rect: RECT = zeroed(); GetClientRect(hwnd, &mut rect);
+                    state.sidebar_width = cur_x.clamp(200, (rect.right - 160).max(200));
+                    state.refresh_view(hwnd, true);
+                    return 0;
+                }
 
                 if !state.is_dragging {
                     if !state.is_fullscreen {
@@ -4014,6 +4080,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_LBUTTONUP => {
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
+                if state.resizing_sidebar {
+                    state.resizing_sidebar = false;
+                    ReleaseCapture();
+                    return 0;
+                }
                 if state.is_dragging {
                     state.is_dragging = false;
                     ReleaseCapture();
@@ -4132,7 +4203,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let mut pt = POINT { x: (lparam & 0xFFFF) as i16 as i32, y: ((lparam >> 16) & 0xFFFF) as i16 as i32 };
                 ScreenToClient(hwnd, &mut pt);
 
-                if !ctrl_pressed && state.show_sidebar && pt.x >= 0 && pt.x < SIDEBAR_WIDTH {
+                if !ctrl_pressed && state.show_sidebar && pt.x >= 0 && pt.x < state.sidebar_width {
                     state.scroll_sidebar(delta, hwnd);
                     return 0;
                 }
@@ -4566,6 +4637,7 @@ fn main() {
         DragAcceptFiles(hwnd, 1);
 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut app_state as *mut _ as isize);
+        windows_sys::Win32::UI::WindowsAndMessaging::SetTimer(hwnd, 1, 500, None);
         app_state.refresh_view(hwnd, true);
         ShowWindow(hwnd, SW_SHOW);
 
