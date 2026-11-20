@@ -70,9 +70,15 @@ fn pdf_open_render_search_edit_save_roundtrip() {
     let output = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/regression-output");
     fs::create_dir_all(&output).unwrap();
     let mut state = AppState::new();
+    assert!(state.show_sidebar);
+    assert!(state.sidebar_tab == SidebarTab::Thumbnails);
+    state.show_sidebar = false;
+    state.sidebar_tab = SidebarTab::Search;
     assert!(state.save_pdf_to_path(output.join("empty.pdf").to_str().unwrap(), None).is_err());
     state.load_file(concat!(env!("CARGO_MANIFEST_DIR"), "/test-한글.pdf")).unwrap();
     assert_eq!(state.page_count, 2);
+    assert!(state.show_sidebar);
+    assert!(state.sidebar_tab == SidebarTab::Thumbnails);
     assert!(state.extract_page_text_at(0).unwrap().contains("DaPDF Rendering Test"));
     state.search_query = "Rendering".into();
     state.perform_search(true);

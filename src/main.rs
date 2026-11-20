@@ -580,6 +580,7 @@ struct TextSelection {
 enum SidebarTab {
     Bookmarks,
     Thumbnails,
+    Search,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -668,7 +669,6 @@ const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
     ToolbarButton { id: IDM_VIEW_FIT_WIDTH, label: "↔ 폭맞춤", width: 68 },
     ToolbarButton { id: IDM_VIEW_SPREAD, label: "📖 2p양면", width: 70 },
     ToolbarButton { id: IDM_THEME_DARK_DOC, label: "🌙 다크", width: 60 },
-    ToolbarButton { id: IDM_VIEW_BOOKMARKS, label: "📑 목차", width: 60 },
     ToolbarButton { id: IDM_VIEW_THUMBNAILS, label: "🖼 썸네일", width: 70 },
     ToolbarButton { id: IDM_ANNOT_NONE, label: "✋ 이동", width: 60 },
     ToolbarButton { id: IDM_ANNOT_TEXT_SELECT, label: "🔤 선택", width: 60 },
@@ -823,8 +823,8 @@ impl AppState {
             active_match: 0,
             goto_input: String::new(),
             bookmarks: Vec::new(),
-            show_sidebar: false,
-            sidebar_tab: SidebarTab::Bookmarks,
+            show_sidebar: true,
+            sidebar_tab: SidebarTab::Thumbnails,
             bookmark_scroll: 0,
             thumb_scroll: 0,
             thumb_cache: HashMap::new(),
@@ -1241,6 +1241,8 @@ impl AppState {
         self.thumb_scroll = 0;
         self.file_name = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string();
         self.load_bookmarks();
+        self.show_sidebar = true;
+        self.sidebar_tab = SidebarTab::Thumbnails;
         self.overlays = unsafe { annotations::take_managed_overlays(self.doc) };
         self.history = history::EditHistory::default();
         self.mark_saved()?;
@@ -1687,10 +1689,6 @@ impl AppState {
             return;
         }
         unsafe { Self::collect_bookmarks_recursive(self.doc, null_mut(), 0, &mut self.bookmarks) };
-        if !self.bookmarks.is_empty() {
-            self.show_sidebar = true;
-            self.sidebar_tab = SidebarTab::Bookmarks;
-        }
     }
 
     unsafe fn collect_bookmarks_recursive(doc: *mut c_void, parent: *mut c_void, depth: usize, out: &mut Vec<BookmarkItem>) {
@@ -2142,6 +2140,7 @@ impl AppState {
             GetClientRect(hwnd, &mut rc);
             let avail_h = (rc.bottom - rc.top) - self.top_bar_offset() - self.bottom_bar_offset();
             match self.sidebar_tab {
+                SidebarTab::Search => {},
                 SidebarTab::Bookmarks => {
                     let max_rows = ((avail_h - SIDEBAR_TAB_HEIGHT) / BOOKMARK_ROW_HEIGHT).max(1) as usize;
                     let max_scroll = self.bookmarks.len().saturating_sub(max_rows);
@@ -2540,13 +2539,12 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     let old_font = SelectObject(hdc, font);
     SetBkMode(hdc, TRANSPARENT as i32);
 
-    let is_bm_tab = state.sidebar_tab == SidebarTab::Bookmarks;
-    SetTextColor(hdc, if is_bm_tab { 0x0080D8FF } else { 0x00AAAAAA });
-    let t1_lbl: Vec<u16> = format!("📑 목차 ({})", state.bookmarks.len()).encode_utf16().collect();
+    SetTextColor(hdc, if state.sidebar_tab == SidebarTab::Thumbnails { 0x0080D8FF } else { 0x00AAAAAA });
+    let t1_lbl: Vec<u16> = format!("썸네일 ({})", state.page_count).encode_utf16().collect();
     TextOutW(hdc, 14, top_off + 10, t1_lbl.as_ptr(), t1_lbl.len() as i32);
 
-    SetTextColor(hdc, if !is_bm_tab { 0x0080D8FF } else { 0x00AAAAAA });
-    let t2_lbl: Vec<u16> = format!("🖼 썸네일 ({})", state.page_count).encode_utf16().collect();
+    SetTextColor(hdc, if state.sidebar_tab == SidebarTab::Search { 0x0080D8FF } else { 0x00AAAAAA });
+    let t2_lbl: Vec<u16> = "검색".encode_utf16().collect();
     TextOutW(hdc, 134, top_off + 10, t2_lbl.as_ptr(), t2_lbl.len() as i32);
 
     SetTextColor(hdc, 0x00999999);
@@ -2557,6 +2555,32 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
     let avail_h = (panel_bottom - content_top).max(26);
 
     match state.sidebar_tab {
+        SidebarTab::Search => {
+            let mut field = RECT { left: 12, top: content_top + 12, right: SIDEBAR_WIDTH - 12, bottom: content_top + 48 };
+            let brush = CreateSolidBrush(if state.input_mode == InputMode::Search { 0x00505050 } else { 0x00383838 });
+            FillRect(hdc, &field, brush);
+            DeleteObject(brush as _);
+            SetTextColor(hdc, 0x00EEEEEE);
+            let label = if state.search_query.is_empty() { "검색어 입력...".to_string() }
+                else { format!("{}{}", state.search_query, if state.input_mode == InputMode::Search { "_" } else { "" }) };
+            let label: Vec<u16> = label.encode_utf16().collect();
+            field.left += 8; field.right -= 8;
+            DrawTextW(hdc, label.as_ptr(), label.len() as i32, &mut field, 0x20 | 0x4 | 0x8000);
+            let labels = [
+                (12, content_top + 64, "◀ 이전     다음 ▶".to_string()),
+                (12, content_top + 108, if state.search_query.is_empty() { "문서 전체에서 검색합니다".into() }
+                    else if state.search_matches.is_empty() { "검색 결과 없음".into() }
+                    else { format!("{}페이지 · {} / {}건", state.current_page + 1, state.active_match + 1, state.search_matches.len()) }),
+                (12, content_top + 144, "Enter: 검색 / F3: 다음".into()),
+                (12, content_top + 176, "Shift+F3: 이전 / Esc: 입력 종료".into()),
+            ];
+            for (x, y, label) in labels {
+                if y + 20 <= panel_bottom {
+                    let text: Vec<u16> = label.encode_utf16().collect();
+                    TextOutW(hdc, x, y, text.as_ptr(), text.len() as i32);
+                }
+            }
+        }
         SidebarTab::Bookmarks => {
             let max_rows = (avail_h / BOOKMARK_ROW_HEIGHT).max(1) as usize;
             for (i, bm) in state.bookmarks.iter().enumerate().skip(state.bookmark_scroll).take(max_rows) {
@@ -3069,9 +3093,7 @@ unsafe fn build_main_menu_bar() -> *mut c_void {
     add_item(m_view, IDM_VIEW_SPREAD, "두 페이지 양면 보기 (2p)\tD");
     add_item(m_view, IDM_VIEW_ROTATE_CW, "시계 방향 회전 (90°)\tR");
     add_sep(m_view);
-    add_item(m_view, IDM_VIEW_BOOKMARKS, "좌측 패널: 목차(Bookmarks) 탭\tB");
     add_item(m_view, IDM_VIEW_THUMBNAILS, "좌측 패널: 페이지 썸네일 미리보기 탭");
-    add_item(m_view, IDM_VIEW_AUTO_BOOKMARK, "자동 북마크(목차) 생성");
     add_item(m_view, IDM_VIEW_FULLSCREEN, "전체 화면\tF11");
     add_sub(hmenu, m_view, "보기(&V)");
 
@@ -3463,16 +3485,14 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
         IDM_VIEW_SPREAD => state.toggle_spread_mode(hwnd),
         IDM_VIEW_ROTATE_CW => state.rotate_page(true, hwnd),
         IDM_VIEW_BOOKMARKS => {
-            if state.show_sidebar && state.sidebar_tab == SidebarTab::Bookmarks { state.show_sidebar = false; }
-            else { state.show_sidebar = true; state.sidebar_tab = SidebarTab::Bookmarks; }
-            state.refresh_view(hwnd, true);
+            // The outline panel is disabled; thumbnails are the default navigation.
         }
         IDM_VIEW_THUMBNAILS => {
             if state.show_sidebar && state.sidebar_tab == SidebarTab::Thumbnails { state.show_sidebar = false; }
             else { state.show_sidebar = true; state.sidebar_tab = SidebarTab::Thumbnails; }
             state.refresh_view(hwnd, true);
         }
-        IDM_VIEW_AUTO_BOOKMARK => state.generate_auto_bookmarks(hwnd),
+        IDM_VIEW_AUTO_BOOKMARK => {},
         IDM_VIEW_FULLSCREEN => state.toggle_fullscreen(hwnd),
 
         IDM_ORG_INSERT_BLANK => state.insert_blank_page_after_current(hwnd),
@@ -3484,7 +3504,9 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
         IDM_TOOL_SEARCH => {
             if !state.doc.is_null() {
                 state.input_mode = InputMode::Search;
-                state.refresh_view(hwnd, false);
+                state.show_sidebar = true;
+                state.sidebar_tab = SidebarTab::Search;
+                state.refresh_view(hwnd, true);
             }
         }
         IDM_TOOL_GOTO => {
@@ -3728,12 +3750,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     if click_y >= top_off && click_y < top_off + SIDEBAR_TAB_HEIGHT {
                         if click_x >= 246 {
                             state.show_sidebar = false;
+                            if state.input_mode == InputMode::Search { state.input_mode = InputMode::Normal; }
                             state.refresh_view(hwnd, true);
                         } else if click_x < 123 {
-                            state.sidebar_tab = SidebarTab::Bookmarks;
+                            state.sidebar_tab = SidebarTab::Thumbnails;
+                            state.input_mode = InputMode::Normal;
                             InvalidateRect(hwnd, null(), 0);
                         } else {
-                            state.sidebar_tab = SidebarTab::Thumbnails;
+                            state.sidebar_tab = SidebarTab::Search;
+                            state.input_mode = InputMode::Search;
                             InvalidateRect(hwnd, null(), 0);
                         }
                         return 0;
@@ -3741,6 +3766,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let content_top = top_off + SIDEBAR_TAB_HEIGHT + 4;
                     if click_y >= content_top {
                         match state.sidebar_tab {
+                            SidebarTab::Search => {
+                                let y = click_y - content_top;
+                                if (12..48).contains(&y) {
+                                    state.input_mode = InputMode::Search;
+                                    state.refresh_view(hwnd, false);
+                                } else if (56..96).contains(&y) {
+                                    state.step_search_match(click_x >= 100, hwnd);
+                                }
+                            }
                             SidebarTab::Bookmarks => {
                                 let row = ((click_y - content_top) / BOOKMARK_ROW_HEIGHT) as usize;
                                 if let Some(bm) = state.bookmarks.get(state.bookmark_scroll + row) {
@@ -4319,12 +4353,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             update_window_title(hwnd, state);
                         }
                     }
-                    0x42 => { state.show_sidebar = !state.show_sidebar; state.refresh_view(hwnd, true); }
-                    VK_OEM_4 => state.step_bookmark(false, hwnd),
-                    VK_OEM_6 => state.step_bookmark(true, hwnd),
+                    0x42 => handle_menu_command(hwnd, IDM_VIEW_THUMBNAILS, state),
+                    VK_OEM_4 | VK_OEM_6 => {},
                     0x46 => {
                         if !state.doc.is_null() {
-                            state.input_mode = InputMode::Search;
+                            handle_menu_command(hwnd, IDM_TOOL_SEARCH, state);
                             if !ctrl_pressed { state.ignore_next_char = true; }
                             update_window_title(hwnd, state);
                         }
