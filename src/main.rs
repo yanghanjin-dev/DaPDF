@@ -19,6 +19,7 @@ mod history;
 mod pages;
 mod conversion;
 mod ime;
+mod watermark_dialog;
 
 use windows_sys::Win32::{
     Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
@@ -3531,8 +3532,15 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
             state.refresh_view(hwnd, false);
         }
         IDM_EDIT_WM_CUSTOM => {
-            state.input_mode = InputMode::CustomWatermarkPrompt;
-            state.text_prompt_buf.clear();
+            match watermark_dialog::show(hwnd, state.watermark_text.as_deref().unwrap_or("")) {
+                Ok(Some(text)) => {
+                    state.watermark_text = Some(text);
+                    state.input_mode = InputMode::Normal;
+                    state.status_msg = Some("사용자 지정 워터마크 적용 완료".into());
+                }
+                Ok(None) => {},
+                Err(error) => state.status_msg = Some(error),
+            }
             state.refresh_view(hwnd, false);
         }
         IDM_EDIT_WM_CLEAR => {
