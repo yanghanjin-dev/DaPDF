@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn korean_search_composition_updates_inline_without_duplicate_commits() {
+    let mut state = AppState::new();
+    for pending in ["ㄱ", "고", "공"] {
+        state.update_search_composition(None, Some(pending));
+        assert_eq!(state.search_display_text(), pending);
+        assert_eq!(state.search_query, "");
+    }
+    state.update_search_composition(Some("공"), Some("ㅈ"));
+    assert_eq!(state.search_query, "공");
+    assert_eq!(state.search_display_text(), "공ㅈ");
+    state.update_search_composition(None, Some("정"));
+    assert_eq!(state.search_display_text(), "공정");
+    state.update_search_composition(Some("정"), None);
+    assert_eq!(state.search_display_text(), "공정");
+    assert_eq!(state.search_query, "공정");
+    state.update_search_composition(None, Some("거"));
+    state.update_search_composition(None, Some(""));
+    assert_eq!(state.search_display_text(), "공정");
+}
+
+#[test]
 fn page_ranges_reject_invalid_and_duplicate_pages() {
     assert_eq!(pages::parse_range("1-3,5",5).unwrap(),vec![0,1,2,4]);
     assert_eq!(pages::parse_range("3,1,2",3).unwrap(),vec![2,0,1]);
@@ -99,8 +120,20 @@ fn pdf_open_render_search_edit_save_roundtrip() {
     assert!(state.sidebar_tab == SidebarTab::Thumbnails);
     assert!(state.extract_page_text_at(0).unwrap().contains("DaPDF Rendering Test"));
     state.search_query = "Rendering".into();
+    state.search_query_changed();
+    assert!(state.submitted_search.is_none());
+    assert!(state.search_matches.is_empty());
     state.perform_search(true);
     assert_eq!(state.search_matches.len(), 1);
+    assert_eq!(state.search_page_counts, vec![1, 1]);
+    assert_eq!(state.search_summary(), "문서 전체: 총 2건 · 현재 1번째");
+    state.search_query = "not-present-in-this-document".into();
+    state.search_query_changed();
+    assert_eq!(state.search_summary(), "Enter를 눌러 검색하세요");
+    state.perform_search(true);
+    assert_eq!(state.search_summary(), "문서 전체: 총 0건");
+    state.search_query = "Rendering".into();
+    state.perform_search(true);
     assert_eq!(state.build_text_selection(0, 0, 4).unwrap().text, "DaPDF");
     for (spread, rotation) in [(false, 0), (true, 0), (false, 1)] {
         state.spread_mode = spread;

@@ -18,6 +18,7 @@ mod printing;
 mod history;
 mod pages;
 mod conversion;
+mod ime;
 
 use windows_sys::Win32::{
     Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
@@ -686,6 +687,8 @@ struct AppState {
     sidebar_width: i32,
     resizing_sidebar: bool,
     search_caret_visible: bool,
+    search_composition: String,
+    search_ime_active: bool,
     window_focused: bool,
     status_controls: Vec<StatusControl>,
     status_info_rect: RECT,
@@ -739,6 +742,8 @@ struct AppState {
     ignore_next_char: bool,
     text_prompt_buf: String,
     search_query: String,
+    submitted_search: Option<String>,
+    search_page_counts: Vec<usize>,
     search_matches: Vec<SearchMatch>,
     active_match: usize,
     goto_input: String,
@@ -776,6 +781,8 @@ impl AppState {
             sidebar_width: SIDEBAR_WIDTH,
             resizing_sidebar: false,
             search_caret_visible: true,
+            search_composition: String::new(),
+            search_ime_active: false,
             window_focused: true,
             status_controls: Vec::new(),
             status_info_rect: unsafe { zeroed() },
@@ -827,6 +834,8 @@ impl AppState {
             ignore_next_char: false,
             text_prompt_buf: String::new(),
             search_query: String::new(),
+            submitted_search: None,
+            search_page_counts: Vec::new(),
             search_matches: Vec::new(),
             active_match: 0,
             goto_input: String::new(),
@@ -1242,6 +1251,10 @@ impl AppState {
         self.input_mode = InputMode::Normal;
         self.active_tool = ActiveTool::TextSelect;
         self.search_query.clear();
+        self.submitted_search = None;
+        self.search_page_counts.clear();
+        self.search_composition.clear();
+        self.search_ime_active = false;
         self.search_matches.clear();
         self.active_match = 0;
         self.goto_input.clear();
@@ -1770,6 +1783,21 @@ impl AppState {
     }
 
     fn perform_search(&mut self, allow_page_jump: bool) {
+        if !allow_page_jump && self.submitted_search.as_deref() != Some(self.search_query.as_str()) {
+            self.search_matches.clear();
+            return;
+        }
+        if allow_page_jump {
+            self.submitted_search = Some(self.search_query.clone());
+            self.search_page_counts = (0..self.page_count)
+                .map(|page| self.collect_matches_on_page(page).len()).collect();
+            if let Some(page) = self.search_page_counts.iter().position(|&count| count > 0) {
+                self.current_page = page as i32;
+                self.pan_x = 0;
+                self.pan_y = 0;
+                self.pending_align_top = self.fit_width;
+            }
+        }
         self.search_matches.clear();
         self.active_match = 0;
         self.status_msg = None;
@@ -1832,6 +1860,7 @@ impl AppState {
     }
 
     fn step_search_match(&mut self, forward: bool, hwnd: HWND) {
+        if self.submitted_search.as_deref() != Some(self.search_query.as_str()) { return; }
         if self.doc.is_null() || self.page_count <= 0 || self.search_query.is_empty() {
             return;
         }
@@ -1868,6 +1897,33 @@ impl AppState {
 
     fn sidebar_offset(&self) -> i32 {
         if self.show_sidebar { self.sidebar_width } else { 0 }
+    }
+
+    fn search_summary(&self) -> String {
+        if self.submitted_search.as_deref() != Some(self.search_query.as_str()) || !self.search_composition.is_empty() {
+            return "Enter를 눌러 검색하세요".into();
+        }
+        let total: usize = self.search_page_counts.iter().sum();
+        if total == 0 { return "문서 전체: 총 0건".into(); }
+        let before: usize = self.search_page_counts.iter().take(self.current_page.max(0) as usize).sum();
+        let current = if self.search_matches.is_empty() { 0 } else { before + self.active_match + 1 };
+        format!("문서 전체: 총 {}건 · 현재 {}번째", total, current)
+    }
+
+    fn submit_or_advance_search(&mut self, hwnd: HWND) {
+        if self.submitted_search.as_deref() == Some(self.search_query.as_str()) {
+            self.step_search_match(true, hwnd);
+        } else {
+            self.perform_search(true);
+            self.refresh_view(hwnd, true);
+        }
+    }
+
+    fn search_query_changed(&mut self) {
+        self.submitted_search = None;
+        self.search_page_counts.clear();
+        self.search_matches.clear();
+        self.active_match = 0;
     }
 
     fn align_vertical_pan_if_needed(&mut self, viewport_h: i32) {
@@ -2573,8 +2629,8 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
             DeleteObject(brush as _);
             SetTextColor(hdc, 0x00EEEEEE);
             let focused = state.input_mode == InputMode::Search;
-            let label = if state.search_query.is_empty() && !focused { "검색어 입력...".to_string() }
-                else { state.search_query.clone() };
+            let label = if state.search_query.is_empty() && state.search_composition.is_empty() && !focused { "검색어 입력...".to_string() }
+                else { state.search_display_text() };
             // Win32 drawing may inspect the buffer even when its character count
             // is zero. Keep a real NUL-terminated buffer for an empty search box.
             let label = to_wstring(&label);
@@ -2593,10 +2649,8 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
             }
             let labels = [
                 (12, content_top + 64, "◀ 이전     다음 ▶".to_string()),
-                (12, content_top + 108, if state.search_query.is_empty() { "문서 전체에서 검색합니다".into() }
-                    else if state.search_matches.is_empty() { "검색 결과 없음".into() }
-                    else { format!("{}페이지 · {} / {}건", state.current_page + 1, state.active_match + 1, state.search_matches.len()) }),
-                (12, content_top + 144, "Enter: 검색 / F3: 다음".into()),
+                (12, content_top + 108, state.search_summary()),
+                (12, content_top + 144, "Enter: 검색·다음 / F3: 다음".into()),
                 (12, content_top + 176, "Shift+F3: 이전 / Esc: 입력 종료".into()),
             ];
             for (x, y, label) in labels {
@@ -3637,6 +3691,9 @@ unsafe fn handle_menu_command(hwnd: HWND, cmd_id: u16, state: &mut AppState) {
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
+    if !state_ptr.is_null() && matches!(msg, 0x0281 | 0x010D | 0x010E | 0x010F) {
+        if let Some(result) = ime::handle_message(&mut *state_ptr, hwnd, msg, wparam, lparam) { return result; }
+    }
 
     match msg {
         windows_sys::Win32::UI::WindowsAndMessaging::WM_CAPTURECHANGED => {
@@ -4235,7 +4292,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         if ch >= 0x20 {
                             if let Some(c) = char::from_u32(ch) {
                                 state.search_query.push(c);
-                                if state.input_mode == InputMode::Search { state.perform_search(true); }
+                                if state.input_mode == InputMode::Search { state.search_query_changed(); }
                                 state.refresh_view(hwnd, true);
                             }
                         }
@@ -4285,6 +4342,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     if wparam == 0x50 { handle_menu_command(hwnd,IDM_FILE_PRINT,state); return 0; }
                 }
                 let key = wparam as u16;
+                // Backspace/Enter/Escape belong to the IME while a syllable is
+                // being composed; do not edit the already committed query too.
+                if state.input_mode == InputMode::Search && state.search_ime_active {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
+                }
                 let shift_pressed = (GetKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0;
                 let ctrl_pressed = (GetKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0;
 
@@ -4368,9 +4430,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                 }
                                 InputMode::SearchRedactPrompt => state.apply_search_redaction(hwnd),
                                 InputMode::Search => {
-                                    if state.search_matches.is_empty() && !state.search_query.is_empty() {
-                                        state.perform_search(true);
-                                    }
+                                    state.input_mode = InputMode::Search;
+                                    state.submit_or_advance_search(hwnd);
                                 }
                                 InputMode::Normal => {}
                             }
@@ -4387,7 +4448,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                 }
                                 InputMode::Search | InputMode::SearchRedactPrompt => {
                                     state.search_query.pop();
-                                    if state.input_mode == InputMode::Search { state.perform_search(true); }
+                                    if state.input_mode == InputMode::Search { state.search_query_changed(); }
                                 }
                                 InputMode::Normal => {}
                             }
