@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn thumbnail_viewport_maps_clipped_document_to_preview() {
+    let mut state = AppState::new();
+    state.sidebar_width = 280;
+    state.toolbar_height = 50;
+    state.statusbar_height = 30;
+    state.last_draw_x = 180;
+    state.last_draw_y = -150;
+    state.p1_rect_in_bmp = RECT { left: 0, top: 0, right: 1000, bottom: 2000 };
+    let visible = state.thumbnail_viewport(0, 20, 100, 200, 400, 1080, 880).unwrap();
+    assert_eq!((visible.left, visible.top, visible.right, visible.bottom), (40, 140, 200, 300));
+    assert!(state.thumbnail_viewport(3, 20, 100, 200, 400, 1080, 880).is_none());
+    let narrow = state.thumbnail_row_height();
+    state.sidebar_width = 480;
+    assert!(state.thumbnail_row_height() > narrow);
+}
+
+#[test]
 fn korean_search_composition_updates_inline_without_duplicate_commits() {
     let mut state = AppState::new();
     for pending in ["ㄱ", "고", "공"] {
@@ -47,7 +64,7 @@ fn toolbar_labels_fit_and_wrapped_buttons_remain_clickable() {
                     search_state.input_mode = mode;
                     for visible in [true, false] {
                         search_state.search_caret_visible = visible;
-                        draw_left_sidebar_panel(hdc, 800, &mut search_state);
+                        draw_left_sidebar_panel(hdc, 1200, 800, &mut search_state);
                     }
                 }
             }
@@ -146,6 +163,13 @@ fn pdf_open_render_search_edit_save_roundtrip() {
     }
     assert!(state.get_or_render_thumbnail(0).is_some());
     assert!(state.thumb_cache.contains_key(&0));
+    let small = state.get_or_render_thumbnail(0).unwrap();
+    state.sidebar_width = 480;
+    let large = state.get_or_render_thumbnail(0).unwrap();
+    assert!(large.width > small.width && large.height > small.height);
+    state.sidebar_width = 200;
+    let reduced = state.get_or_render_thumbnail(0).unwrap();
+    assert!(reduced.width <= 160);
     unsafe {
         let page = FPDF_LoadPage(state.doc, 0);
         assert!(!page.is_null());

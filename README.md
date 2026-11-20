@@ -1,4 +1,4 @@
-# DaPDF Viewer & Editor v0.1.6
+# DaPDF Viewer & Editor v0.1.7
 
 Rust + Win32 GDI + PDFium 기반 Windows x64 PDF 뷰어 및 실험적 편집 도구입니다.
 
@@ -6,8 +6,8 @@ Rust + Win32 GDI + PDFium 기반 Windows x64 PDF 뷰어 및 실험적 편집 도
 
 Windows x64에서 다음 두 방식으로 실행할 수 있습니다.
 
-- 설치형: `DaPDF-v0.1.6-win-x64-setup.exe`를 실행하고 UAC 관리자 권한 요청을 승인합니다. 기본 경로는 `C:\Program Files\DaPDF`이며 모든 사용자에게 설치됩니다. 시작 메뉴 바로가기가 생성되고, 바탕화면 바로가기와 PDF 연결 프로그램 등록은 선택할 수 있습니다.
-- 포터블: `DaPDF-v0.1.6-win-x64.zip`을 풀고 `DaPDF.exe`를 실행합니다. 같은 폴더의 `pdfium.dll`, 라이선스 파일과 `licenses/` 폴더를 함께 유지하세요.
+- 설치형: `DaPDF-v0.1.7-win-x64-setup.exe`를 실행하고 UAC 관리자 권한 요청을 승인합니다. 기본 경로는 `C:\Program Files\DaPDF`이며 모든 사용자에게 설치됩니다. 시작 메뉴 바로가기가 생성되고, 바탕화면 바로가기와 PDF 연결 프로그램 등록은 선택할 수 있습니다.
+- 포터블: `DaPDF-v0.1.7-win-x64.zip`을 풀고 `DaPDF.exe`를 실행합니다. 같은 폴더의 `pdfium.dll`, 라이선스 파일과 `licenses/` 폴더를 함께 유지하세요.
 
 제거는 Windows **설정 → 앱 → 설치된 앱 → DaPDF → 제거**, 또는 시작 메뉴의 **DaPDF 제거**를 사용합니다. 제거에도 관리자 권한이 필요합니다. 설치한 프로그램 파일·바로가기·등록 정보가 제거되며, 사용자가 별도로 만든 PDF와 문서는 보존됩니다. PDF 기본 앱은 자동 변경하지 않습니다. 포터블 버전은 설치 목록에 등록되지 않습니다.
 
@@ -61,7 +61,7 @@ cargo run --release --offline -- "test-한글.pdf"
 
 배포 스크립트는 `VERSION`과 `Cargo.toml`의 일치를 검사하고 회귀 테스트, 릴리스 빌드, 패키징을 수행합니다. `releases/`에 ZIP·설치 EXE와 각각의 SHA256 파일을 생성하며 GitHub에 업로드하지 않습니다. 설치 EXE 제작에는 Inno Setup 컴파일러가 필요합니다. `-SkipInstaller`로 포터블 ZIP만 만들 수 있습니다. 기존 버전 번호를 변경하거나 기존 배포 폴더를 삭제하지 않습니다. 설치 구성과 테스트 방법은 [설치 프로그램 문서](installer/README.md)를 확인하세요.
 
-검증 범위와 결과는 [v0.1.6 릴리스 노트](releases/notes-v0.1.6.md)를 확인하세요.
+검증 범위와 결과는 [v0.1.7 릴리스 노트](releases/notes-v0.1.7.md)를 확인하세요.
 
 ## 별도 웹 에디터
 

@@ -684,6 +684,8 @@ const TOOLBAR_BUTTONS: &[ToolbarButton] = &[
 ];
 
 struct AppState {
+    saved_menu: *mut c_void,
+    thumbnail_cache_width: i32,
     sidebar_width: i32,
     resizing_sidebar: bool,
     search_caret_visible: bool,
@@ -778,6 +780,8 @@ impl AppState {
         wp.length = size_of::<WINDOWPLACEMENT>() as u32;
 
         Self {
+            saved_menu: null_mut(),
+            thumbnail_cache_width: 0,
             sidebar_width: SIDEBAR_WIDTH,
             resizing_sidebar: false,
             search_caret_visible: true,
@@ -1067,6 +1071,10 @@ impl AppState {
     }
 
     fn get_or_render_thumbnail(&mut self, page_idx: i32) -> Option<ThumbnailCache> {
+        if self.thumbnail_cache_width != self.sidebar_width {
+            self.clear_thumbnail_cache();
+            self.thumbnail_cache_width = self.sidebar_width;
+        }
         if let Some(cached) = self.thumb_cache.get(&page_idx) {
             return Some(cached.clone());
         }
@@ -1081,9 +1089,9 @@ impl AppState {
             let raw_w = FPDF_GetPageWidth(page);
             let raw_h = FPDF_GetPageHeight(page);
             let (pw, ph) = if self.rotation % 2 == 1 { (raw_h, raw_w) } else { (raw_w, raw_h) };
-            let scale = (156.0 / pw.max(1.0)).min(176.0 / ph.max(1.0));
-            let tw = ((pw * scale) as i32).clamp(24, 180);
-            let th = ((ph * scale) as i32).clamp(24, 190);
+            let scale = ((self.sidebar_width - 40).max(24) as f64 / pw.max(1.0)).min((self.thumbnail_row_height() - 40) as f64 / ph.max(1.0));
+            let tw = (pw * scale).round().max(1.0) as i32;
+            let th = (ph * scale).round().max(1.0) as i32;
             let bitmap = FPDFBitmap_Create(tw, th, 1);
             if bitmap.is_null() {
                 FPDF_ClosePage(page);
@@ -1895,6 +1903,31 @@ impl AppState {
         }
     }
 
+    fn thumbnail_row_height(&self) -> i32 {
+        ((self.sidebar_width - 40).max(24) as f64 * 1.42).ceil() as i32 + 40
+    }
+
+    fn thumbnail_viewport(&self, page: i32, tx: i32, ty: i32, tw: i32, th: i32, client_w: i32, client_h: i32) -> Option<RECT> {
+        let source = if page == self.current_page { self.p1_rect_in_bmp }
+            else if page == self.current_page + 1 { self.p2_rect_in_bmp? } else { return None; };
+        let width = source.right - source.left;
+        let height = source.bottom - source.top;
+        if width <= 0 || height <= 0 { return None; }
+        let x = self.last_draw_x + source.left;
+        let y = self.last_draw_y + source.top;
+        let left = x.max(self.sidebar_offset());
+        let top = y.max(self.top_bar_offset());
+        let right = (x + width).min(client_w);
+        let bottom = (y + height).min(client_h - self.bottom_bar_offset());
+        if left >= right || top >= bottom { return None; }
+        Some(RECT {
+            left: tx + ((left - x) as f64 * tw as f64 / width as f64).floor() as i32,
+            top: ty + ((top - y) as f64 * th as f64 / height as f64).floor() as i32,
+            right: tx + ((right - x) as f64 * tw as f64 / width as f64).ceil() as i32,
+            bottom: ty + ((bottom - y) as f64 * th as f64 / height as f64).ceil() as i32,
+        })
+    }
+
     fn sidebar_offset(&self) -> i32 {
         if self.show_sidebar { self.sidebar_width } else { 0 }
     }
@@ -2215,7 +2248,7 @@ impl AppState {
                     }
                 }
                 SidebarTab::Thumbnails => {
-                    let max_rows = ((avail_h - SIDEBAR_TAB_HEIGHT) / THUMB_ITEM_HEIGHT).max(1) as usize;
+                    let max_rows = ((avail_h - SIDEBAR_TAB_HEIGHT) / self.thumbnail_row_height()).max(1) as usize;
                     let max_scroll = (self.page_count.max(0) as usize).saturating_sub(max_rows);
                     if wheel_delta < 0 {
                         self.thumb_scroll = (self.thumb_scroll + 1).min(max_scroll);
@@ -2290,6 +2323,8 @@ impl AppState {
                 let mut mi: MONITORINFO = zeroed();
                 mi.cbSize = size_of::<MONITORINFO>() as u32;
                 if GetMonitorInfoW(hmonitor, &mut mi) != 0 {
+                    self.saved_menu = windows_sys::Win32::UI::WindowsAndMessaging::GetMenu(hwnd);
+                    SetMenu(hwnd, null_mut());
                     SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !WS_OVERLAPPEDWINDOW) as isize);
                     SetWindowPos(
                         hwnd,
@@ -2303,6 +2338,7 @@ impl AppState {
                     self.is_fullscreen = true;
                 }
             } else {
+                SetMenu(hwnd, self.saved_menu);
                 SetWindowLongPtrW(hwnd, GWL_STYLE, (style | WS_OVERLAPPEDWINDOW) as isize);
                 SetWindowPlacement(hwnd, &self.saved_placement);
                 SetWindowPos(hwnd, null_mut(), 0, 0, 0, 0, SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED | 0x0003);
@@ -2585,7 +2621,7 @@ fn open_file_dialog(hwnd: HWND) -> Option<String> {
     }
 }
 
-unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut AppState) {
+unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_w: i32, client_h: i32, state: &mut AppState) {
     let top_off = state.top_bar_offset();
     let bot_off = state.bottom_bar_offset();
     let panel_bottom = client_h - bot_off;
@@ -2620,6 +2656,8 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
 
     let content_top = top_off + SIDEBAR_TAB_HEIGHT + 4;
     let avail_h = (panel_bottom - content_top).max(26);
+    let saved_dc = windows_sys::Win32::Graphics::Gdi::SaveDC(hdc);
+    windows_sys::Win32::Graphics::Gdi::IntersectClipRect(hdc, 0, content_top, state.sidebar_width - 3, panel_bottom);
 
     match state.sidebar_tab {
         SidebarTab::Search => {
@@ -2675,17 +2713,18 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
             }
         }
         SidebarTab::Thumbnails => {
-            let max_rows = (avail_h / THUMB_ITEM_HEIGHT).max(1) as usize;
+            let row_height = state.thumbnail_row_height();
+            let max_rows = ((avail_h + row_height - 1) / row_height).max(1) as usize;
             let total_pages = state.page_count.max(0) as usize;
             let start_idx = state.thumb_scroll;
             let end_idx = (start_idx + max_rows).min(total_pages);
             for (slot, page_u) in (start_idx..end_idx).enumerate() {
                 let p_idx = page_u as i32;
-                let item_top = content_top + (slot as i32) * THUMB_ITEM_HEIGHT + 4;
+                let item_top = content_top + (slot as i32) * row_height + 4;
                 let is_active = p_idx == state.current_page;
                 if let Some(thumb) = state.get_or_render_thumbnail(p_idx) {
                     let tx = 16 + ((state.sidebar_width - 34) - thumb.width) / 2;
-                    let ty = item_top + 6 + (176 - thumb.height) / 2;
+                    let ty = item_top + 6 + (row_height - 40 - thumb.height) / 2;
                     let mut bmi: BITMAPINFO = zeroed();
                     bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
                     bmi.bmiHeader.biWidth = thumb.width;
@@ -2697,14 +2736,29 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
                         hdc, tx, ty, thumb.width, thumb.height, 0, 0, thumb.width, thumb.height,
                         thumb.pixels.as_ptr() as *const c_void, &bmi, DIB_RGB_COLORS, SRCCOPY,
                     );
+                    if is_active {
+                        draw_thumbnail_outline(hdc, RECT { left: tx - 3, top: ty - 3, right: tx + thumb.width + 3, bottom: ty + thumb.height + 3 }, 0x000000FF, 3);
+                    }
+                    if let Some(visible) = state.thumbnail_viewport(p_idx, tx, ty, thumb.width, thumb.height, client_w, client_h) {
+                        draw_thumbnail_outline(hdc, visible, 0x00FF6600, 2);
+                    }
                 }
                 SetTextColor(hdc, if is_active { 0x0000EAFF } else { 0x00DDDDDD });
                 let w_p: Vec<u16> = format!("- {} -", p_idx + 1).encode_utf16().collect();
-                TextOutW(hdc, state.sidebar_width / 2 - 20, item_top + THUMB_ITEM_HEIGHT - 28, w_p.as_ptr(), w_p.len() as i32);
+                TextOutW(hdc, state.sidebar_width / 2 - 20, item_top + row_height - 28, w_p.as_ptr(), w_p.len() as i32);
             }
         }
     }
+    windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc, saved_dc);
     SelectObject(hdc, old_font);
+}
+
+unsafe fn draw_thumbnail_outline(hdc: *mut c_void, rect: RECT, color: u32, width: i32) {
+    let pen = CreatePen(PS_SOLID, width, color);
+    let old_pen = SelectObject(hdc, pen);
+    let old_brush = SelectObject(hdc, GetStockObject(5)); // NULL_BRUSH
+    Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
+    SelectObject(hdc, old_brush); SelectObject(hdc, old_pen); DeleteObject(pen);
 }
 
 // Measure with the same font used to paint; one layout drives both drawing and clicks.
@@ -3906,7 +3960,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                                 }
                             }
                             SidebarTab::Thumbnails => {
-                                let slot = ((click_y - content_top) / THUMB_ITEM_HEIGHT) as usize;
+                                let slot = ((click_y - content_top) / state.thumbnail_row_height()) as usize;
                                 let target_page = (state.thumb_scroll + slot) as i32;
                                 if target_page >= 0 && target_page < state.page_count {
                                     state.go_to_page(target_page, hwnd);
@@ -4618,7 +4672,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
 
                 if state.show_sidebar {
-                    draw_left_sidebar_panel(hdc as *mut c_void, client_h, state);
+                    draw_left_sidebar_panel(hdc as *mut c_void, client_w, client_h, state);
                 }
                 if !state.is_fullscreen {
                     draw_top_toolbar(hdc as *mut c_void, client_w, state);
