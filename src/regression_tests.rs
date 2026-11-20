@@ -13,6 +13,24 @@ fn toolbar_labels_fit_and_wrapped_buttons_remain_clickable() {
         let hdc = CreateCompatibleDC(null_mut());
         assert!(!hdc.is_null());
         let old_font = SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+        let mut search_state = AppState::new();
+        search_state.sidebar_tab = SidebarTab::Search;
+        search_state.input_mode = InputMode::Search;
+        // Opening search with an empty query previously terminated the process
+        // with STATUS_ACCESS_VIOLATION inside the Win32 drawing path.
+        for width in [200, 280, 640] {
+            search_state.sidebar_width = width;
+            for query in ["", "검색", "Rendering", "아주 긴 검색어를 입력해도 검색 패널이 안전하게 표시되어야 합니다"] {
+                search_state.search_query = query.into();
+                for mode in [InputMode::Search, InputMode::Normal] {
+                    search_state.input_mode = mode;
+                    for visible in [true, false] {
+                        search_state.search_caret_visible = visible;
+                        draw_left_sidebar_panel(hdc, 800, &mut search_state);
+                    }
+                }
+            }
+        }
         for dpi in [96, 144, 192, 288] {
             for width in [480, 1000, 2100] {
                 let (rects, height) = toolbar_layout(hdc, width, dpi);

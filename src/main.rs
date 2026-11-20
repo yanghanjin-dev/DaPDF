@@ -2575,12 +2575,17 @@ unsafe fn draw_left_sidebar_panel(hdc: *mut c_void, client_h: i32, state: &mut A
             let focused = state.input_mode == InputMode::Search;
             let label = if state.search_query.is_empty() && !focused { "검색어 입력...".to_string() }
                 else { state.search_query.clone() };
-            let label: Vec<u16> = label.encode_utf16().collect();
+            // Win32 drawing may inspect the buffer even when its character count
+            // is zero. Keep a real NUL-terminated buffer for an empty search box.
+            let label = to_wstring(&label);
+            let label_len = (label.len() - 1) as i32;
             field.left += 8; field.right -= 8;
-            DrawTextW(hdc, label.as_ptr(), label.len() as i32, &mut field, 0x20 | 0x4 | 0x8000);
+            DrawTextW(hdc, label.as_ptr(), label_len, &mut field, 0x20 | 0x4 | 0x8000);
             if focused && state.window_focused && state.search_caret_visible {
                 let mut size: SIZE = zeroed();
-                GetTextExtentPoint32W(hdc, label.as_ptr(), label.len() as i32, &mut size);
+                if label_len > 0 {
+                    GetTextExtentPoint32W(hdc, label.as_ptr(), label_len, &mut size);
+                }
                 let x = (field.left + size.cx).min(field.right - 2);
                 let caret = RECT { left: x, top: field.top + 7, right: x + 2, bottom: field.bottom - 7 };
                 let brush = CreateSolidBrush(0x00FFFFFF);
